@@ -51,6 +51,17 @@ interface CardDraft {
   capturingShot: boolean;
 }
 
+function safeSendMessage<T = unknown>(message: ExtensionMessage): Promise<T | undefined> {
+  if (typeof chrome === 'undefined' || !chrome.runtime?.id) {
+    return Promise.resolve(undefined);
+  }
+  try {
+    return chrome.runtime.sendMessage(message).catch(() => undefined) as Promise<T | undefined>;
+  } catch {
+    return Promise.resolve(undefined);
+  }
+}
+
 export class OverlayManager {
   private host: HTMLDivElement;
   private shadow: ShadowRoot;
@@ -234,7 +245,7 @@ export class OverlayManager {
           this.fileInputEl.click();
           break;
         case 'open-settings':
-          chrome.runtime.sendMessage({ type: 'OPEN_DASHBOARD', tab: 'subtitles' } satisfies ExtensionMessage).catch(() => {});
+          void safeSendMessage({ type: 'OPEN_DASHBOARD', tab: 'subtitles' });
           break;
       }
     });
@@ -246,7 +257,7 @@ export class OverlayManager {
         return;
       }
       if (target.closest('[data-action="open-subtitles-dashboard"]')) {
-        chrome.runtime.sendMessage({ type: 'OPEN_DASHBOARD', tab: 'subtitles' } satisfies ExtensionMessage).catch(() => {});
+        void safeSendMessage({ type: 'OPEN_DASHBOARD', tab: 'subtitles' });
         return;
       }
       const trackItem = target.closest<HTMLElement>('[data-track-id]');
@@ -628,30 +639,26 @@ export class OverlayManager {
       const renderedSubId = this.currentSubtitle?.id;
       for (const compound of compoundCandidates) {
         this.checkedCompounds.add(compound);
-        chrome.runtime
-          .sendMessage({
-            type: 'LOOKUP_WORD',
-            word: compound,
-            exactOnly: true,
-          } satisfies ExtensionMessage)
-          .then((res) => {
-            const entry = (res as { entry?: DictionaryEntry | null })?.entry;
-            if (entry && (entry.word === compound || entry.reading === compound)) {
-              this.verifiedCompounds.add(compound);
-              this.entryCache.set(compound, entry);
-              if (entry.reading) {
-                this.readingCache[compound] = entry.reading;
-              }
-              // Re-render current subtitle with the verified compound merged (unless user is mid-hover)
-              if (
-                this.currentSubtitle?.id === renderedSubId &&
-                !this.popoverEl.classList.contains('ks-open')
-              ) {
-                this.renderCurrentSubtitle();
-              }
+        void safeSendMessage<{ entry?: DictionaryEntry | null }>({
+          type: 'LOOKUP_WORD',
+          word: compound,
+          exactOnly: true,
+        }).then((res) => {
+          const entry = res?.entry;
+          if (entry && (entry.word === compound || entry.reading === compound)) {
+            this.verifiedCompounds.add(compound);
+            this.entryCache.set(compound, entry);
+            if (entry.reading) {
+              this.readingCache[compound] = entry.reading;
             }
-          })
-          .catch(() => {});
+            if (
+              this.currentSubtitle?.id === renderedSubId &&
+              !this.popoverEl.classList.contains('ks-open')
+            ) {
+              this.renderCurrentSubtitle();
+            }
+          }
+        });
       }
     }
 
@@ -662,23 +669,20 @@ export class OverlayManager {
       .slice(0, 8);
 
     for (const token of toFetch) {
-      chrome.runtime
-        .sendMessage({
-          type: 'LOOKUP_WORD',
-          word: token.baseForm,
-          surface: token.surface,
-        } satisfies ExtensionMessage)
-        .then((res) => {
-          const entry = (res as { entry?: DictionaryEntry | null })?.entry;
-          if (entry) {
-            this.entryCache.set(token.baseForm, entry);
-            if (entry.reading) {
-              this.readingCache[token.baseForm] = entry.reading;
-              this.readingCache[token.surface] = entry.reading;
-            }
+      void safeSendMessage<{ entry?: DictionaryEntry | null }>({
+        type: 'LOOKUP_WORD',
+        word: token.baseForm,
+        surface: token.surface,
+      }).then((res) => {
+        const entry = res?.entry;
+        if (entry) {
+          this.entryCache.set(token.baseForm, entry);
+          if (entry.reading) {
+            this.readingCache[token.baseForm] = entry.reading;
+            this.readingCache[token.surface] = entry.reading;
           }
-        })
-        .catch(() => {});
+        }
+      });
     }
   }
 
@@ -737,11 +741,11 @@ export class OverlayManager {
     this.renderPopoverContent(token, null, true);
 
     try {
-      const response = (await chrome.runtime.sendMessage({
+      const response = await safeSendMessage<{ entry?: DictionaryEntry | null }>({
         type: 'LOOKUP_WORD',
         word: token.baseForm,
         surface: token.surface,
-      } satisfies ExtensionMessage)) as { entry?: DictionaryEntry | null };
+      });
 
       if (this.activeToken?.surface !== token.surface) return;
 
@@ -873,16 +877,12 @@ export class OverlayManager {
     if (!this.settings.anki.autoTranslate || this.settings.anki.translationProvider === 'off') {
       return '';
     }
-    try {
-      const res = (await chrome.runtime.sendMessage({
-        type: 'TRANSLATE_SENTENCE',
-        sentence,
-        targetWord,
-      } satisfies ExtensionMessage)) as { translation?: string };
-      return res?.translation?.trim() ?? '';
-    } catch {
-      return '';
-    }
+    const res = await safeSendMessage<{ translation?: string }>({
+      type: 'TRANSLATE_SENTENCE',
+      sentence,
+      targetWord,
+    });
+    return res?.translation?.trim() ?? '';
   }
 
   private async startMineWorkflow(
@@ -926,8 +926,8 @@ export class OverlayManager {
     const [shot, audioRes] = await Promise.all([
       this.captureVideoFrame(),
       this.settings.anki.includeAudio
-        ? chrome.runtime.sendMessage({ type: 'REQUEST_RECENT_AUDIO' } satisfies ExtensionMessage).catch(() => ({}))
-        : Promise.resolve({}),
+        ? safeSendMessage<{ audioBase64?: string; mimeType?: string }>({ type: 'REQUEST_RECENT_AUDIO' })
+        : Promise.resolve(undefined),
     ]);
 
     draft.screenshotDataUrl = shot.dataUrl;
@@ -1259,7 +1259,7 @@ export class OverlayManager {
       this.captureState.status === 'starting';
 
     const type = isActive ? 'STOP_CAPTURE' : 'START_CAPTURE';
-    const nextState = (await chrome.runtime.sendMessage({ type } satisfies ExtensionMessage)) as CaptureState;
+    const nextState = await safeSendMessage<CaptureState>({ type });
     if (nextState?.status) {
       this.updateCaptureState(nextState);
     }

@@ -20,18 +20,30 @@ const STORAGE_KEYS = {
 const MAX_DICT_CACHE_ENTRIES = 600;
 
 function hasChromeStorage(): boolean {
-  return typeof chrome !== 'undefined' && Boolean(chrome.storage?.local);
+  return (
+    typeof chrome !== 'undefined' &&
+    Boolean(chrome.runtime?.id) &&
+    Boolean(chrome.storage?.local)
+  );
 }
 
 async function storageGet<T>(key: string, fallback: T): Promise<T> {
   if (!hasChromeStorage()) return fallback;
-  const result = await chrome.storage.local.get(key);
-  return (result[key] as T) ?? fallback;
+  try {
+    const result = await chrome.storage.local.get(key);
+    return (result[key] as T) ?? fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 async function storageSet(items: Record<string, unknown>): Promise<void> {
   if (!hasChromeStorage()) return;
-  await chrome.storage.local.set(items);
+  try {
+    await chrome.storage.local.set(items);
+  } catch {
+    // Ignore when extension context has been invalidated after reload
+  }
 }
 
 export async function getSettings(): Promise<AppSettings> {

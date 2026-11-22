@@ -42,13 +42,27 @@ async function init() {
 
   tryMount();
 
-  // Re-mount on SPA navigation, dynamic Prime Video player creation, and fullscreen transitions
+  // Re-mount on SPA navigation, dynamic Prime Video player creation, and fullscreen transitions (throttled)
+  let mountTimer: number | null = null;
   const observer = new MutationObserver(() => {
-    tryMount();
+    if (!chrome.runtime?.id) {
+      observer.disconnect();
+      return;
+    }
+    if (mountTimer !== null) return;
+    mountTimer = window.setTimeout(() => {
+      mountTimer = null;
+      if (!chrome.runtime?.id) {
+        observer.disconnect();
+        return;
+      }
+      tryMount();
+    }, 250);
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
   document.addEventListener('fullscreenchange', () => {
+    if (!chrome.runtime?.id) return;
     setTimeout(tryMount, 80);
   });
 
@@ -57,6 +71,7 @@ async function init() {
   document.addEventListener(
     'mousemove',
     () => {
+      if (!chrome.runtime?.id) return;
       const now = Date.now();
       if (now - lastMetaScan > 600) {
         lastMetaScan = now;
@@ -67,12 +82,18 @@ async function init() {
   );
 
   // Sync initial capture state from background worker
-  chrome.runtime
-    .sendMessage({ type: 'GET_CAPTURE_STATE' } satisfies ExtensionMessage)
-    .then((res) => {
-      if (res?.state) overlay.updateCaptureState(res.state);
-    })
-    .catch(() => {});
+  if (chrome.runtime?.id) {
+    try {
+      chrome.runtime
+        .sendMessage({ type: 'GET_CAPTURE_STATE' } satisfies ExtensionMessage)
+        .then((res) => {
+          if (res?.state) overlay.updateCaptureState(res.state);
+        })
+        .catch(() => {});
+    } catch {
+      // ignore
+    }
+  }
 
   // Listen to messages from background service worker & popup
   chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
