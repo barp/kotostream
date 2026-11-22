@@ -47,6 +47,7 @@ interface CardDraft {
   screenshotMeta?: string;
   audioBase64?: string;
   audioMimeType?: string;
+  audioDurationSec?: number;
   translating: boolean;
   capturingShot: boolean;
 }
@@ -59,6 +60,40 @@ function safeSendMessage<T = unknown>(message: ExtensionMessage): Promise<T | un
     return chrome.runtime.sendMessage(message).catch(() => undefined) as Promise<T | undefined>;
   } catch {
     return Promise.resolve(undefined);
+  }
+}
+
+function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+/**
+ * Plays a base64 audio clip using Web Audio API (immune to Amazon Prime / Netflix media-src CSP!).
+ */
+async function playBase64Audio(base64: string, mimeType = 'audio/wav'): Promise<void> {
+  try {
+    const ctx = new AudioContext();
+    const arrayBuffer = base64ToArrayBuffer(base64);
+    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(ctx.destination);
+    source.onended = () => {
+      void ctx.close().catch(() => {});
+    };
+    source.start(0);
+  } catch {
+    // Fallback to Blob URL Audio element
+    const blob = new Blob([base64ToArrayBuffer(base64)], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audio.onended = () => URL.revokeObjectURL(url);
+    await audio.play().catch(() => {});
   }
 }
 
@@ -805,7 +840,10 @@ export class OverlayManager {
           <div class="ks-pop-word">${escapeHtml(word)}</div>
           ${reading && reading !== word ? `<div class="ks-pop-reading">${escapeHtml(reading)}</div>` : ''}
         </div>
-        <div class="ks-badges">${badgesHtml}</div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <div class="ks-badges">${badgesHtml}</div>
+          <button class="ks-btn" style="padding:3px 8px;font-size:11px" data-pop-audio="play" title="Play captured sentence audio">🔊</button>
+        </div>
       </div>
       <div class="ks-pop-senses">${sensesHtml}</div>
       <div class="ks-status-row">
@@ -834,6 +872,26 @@ export class OverlayManager {
         this.renderPopoverContent({ ...token, status }, entry, false);
         this.showToast(`Marked “${word}” as ${status}`);
       });
+    });
+
+    const popAudioBtn = this.popoverEl.querySelector<HTMLButtonElement>('[data-pop-audio="play"]');
+    popAudioBtn?.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const subStart = this.currentSubtitle?.videoTimeSec;
+      const subEnd = this.currentSubtitle?.endTimeSec;
+      const desiredDurationMs =
+        subStart !== undefined && subEnd !== undefined && subEnd > subStart
+          ? Math.min(12000, Math.max(1800, Math.round((subEnd - subStart) * 1000) + 700))
+          : 4500;
+      const audioRes = await safeSendMessage<{ audioBase64?: string; mimeType?: string }>({
+        type: 'REQUEST_RECENT_AUDIO',
+        durationMs: desiredDurationMs,
+      });
+      if (audioRes?.audioBase64) {
+        await playBase64Audio(audioRes.audioBase64, audioRes.mimeType);
+      } else {
+        this.showToast('Enable Sentence Audio in the KotoStream popup to play clips.');
+      }
     });
 
     const mineBtn = this.popoverEl.querySelector<HTMLButtonElement>('[data-mine="srs"]');
@@ -947,8 +1005,9 @@ export class OverlayManager {
     draft.screenshotFormat = shot.format;
     draft.screenshotMeta = shot.meta;
     draft.capturingShot = false;
-    draft.audioBase64 = (audioRes as { audioBase64?: string })?.audioBase64;
-    draft.audioMimeType = (audioRes as { mimeType?: string })?.mimeType;
+    draft.audioBase64 = audioRes?.audioBase64;
+    draft.audioMimeType = audioRes?.mimeType;
+    draft.audioDurationSec = audioRes?.durationSec;
 
     if (!this.settings.anki.openPreviewBeforeSaving) {
       draft.translation = await this.fetchSentenceTranslation(sentence, word);
@@ -1060,9 +1119,9 @@ export class OverlayManager {
 
             ${
               d.audioBase64
-                ? `<div style="display:flex;align-items:center;justify-content:space-between">
-                    <span class="ks-preview-audio-badge">🔊 Sentence audio captured (WAV)</span>
-                    <button type="button" class="ks-btn" data-modal-action="play-audio">▶ Play Clip</button>
+                ? `<div class="ks-shot-box" style="flex-direction:row;align-items:center;justify-content:space-between;padding:8px 10px">
+                    <span class="ks-preview-audio-badge">🔊 Sentence Audio${d.audioDurationSec ? ` (${d.audioDurationSec}s WAV)` : ' (WAV)'}</span>
+                    <button type="button" class="ks-btn ks-btn-primary" data-modal-action="play-audio">▶ Play Audio</button>
                    </div>`
                 : `<div style="font-size:11px;color:#94a3b8">Audio clip: Open the KotoStream popup and load subtitles (or click “Enable Sentence Audio”) to buffer tab audio for mining.</div>`
             }
@@ -1127,9 +1186,12 @@ export class OverlayManager {
       if (action === 'close') {
         this.closeCardCreatorModal();
       } else if (action === 'play-audio' && d.audioBase64) {
-        const mime = d.audioMimeType || 'audio/webm';
-        const audio = new Audio(`data:${mime};base64,${d.audioBase64}`);
-        void audio.play();
+        const playBtn = target as HTMLButtonElement;
+        playBtn.textContent = 'Playing…';
+        await playBase64Audio(d.audioBase64, d.audioMimeType);
+        window.setTimeout(() => {
+          playBtn.textContent = '▶ Play Audio';
+        }, Math.max(800, Math.round((d.audioDurationSec ?? 2) * 1000)));
       } else if (action === 'retranslate') {
         const statusEl = this.modalBackdropEl.querySelector<HTMLElement>('[data-trans-status]');
         if (statusEl) statusEl.textContent = 'Translating…';
