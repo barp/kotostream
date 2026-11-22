@@ -37,5 +37,9 @@ describe('deconjugate', () => {
     expect(deconjugate('やっちまった')).toContain('やる');
     expect(deconjugate('死んじまった')).toContain('死ぬ');
     expect(deconjugate('行っちゃおう')).toContain('行く');
+    expect(deconjugate('引き落とせる')).toContain('引き落とす');
+    expect(deconjugate('引き落とせねえ')).toContain('引き落とす');
+    expect(deconjugate('勝てねえ')).toContain('勝つ');
+    expect(deconjugate('知らねえ')).toContain('知る');
   });
 });

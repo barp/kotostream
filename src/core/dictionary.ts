@@ -282,6 +282,26 @@ export async function lookupOnJisho(word: string, exactOnly = false): Promise<Di
       )
     );
 
+  // If the first query (e.g. potential 引き落とせる) didn't have an exact JMdict hit,
+  // retry with the deconjugated root verb (e.g. 引き落とす)!
+  if (!exactCandidate && candidates.length > 1) {
+    for (const fallback of candidates.slice(1, 3)) {
+      const retryUrl = `https://jisho.org/api/v1/search/words?keyword=${encodeURIComponent(fallback)}`;
+      const retryRes = await fetch(retryUrl);
+      if (retryRes.ok) {
+        const retryJson = (await retryRes.json()) as JishoApiResponse;
+        const retryExact = retryJson.data?.find((item) =>
+          item.japanese.some(
+            (j) => (j.word && candidateSet.has(j.word)) || (j.reading && candidateSet.has(j.reading))
+          )
+        );
+        if (retryExact) {
+          return parseJishoItem(retryExact, fallback, candidates);
+        }
+      }
+    }
+  }
+
   if (exactOnly) {
     return exactCandidate ? parseJishoItem(exactCandidate, query, candidates) : null;
   }

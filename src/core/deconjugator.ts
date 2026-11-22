@@ -40,9 +40,15 @@ const RULES: DeconjugationRule[] = [
 
   // Verb negative / passive / causative / potential
   { suffix: 'られない', replacements: ['る'], reason: 'ichidan passive/potential negative' },
+  { suffix: 'られねえ', replacements: ['る'], reason: 'colloquial passive/potential negative' },
+  { suffix: 'られねぇ', replacements: ['る'], reason: 'colloquial passive/potential negative' },
   { suffix: 'られる', replacements: ['る'], reason: 'ichidan passive/potential' },
   { suffix: 'させる', replacements: ['る'], reason: 'ichidan causative' },
   { suffix: 'ない', replacements: ['る'], reason: 'ichidan negative' },
+  { suffix: 'ねえ', replacements: ['る', 'ない'], reason: 'colloquial negative' },
+  { suffix: 'ねぇ', replacements: ['る', 'ない'], reason: 'colloquial negative' },
+  { suffix: 'ねー', replacements: ['る', 'ない'], reason: 'colloquial negative' },
+  { suffix: 'れる', replacements: ['る'], reason: 'ra-nuki potential' },
   { suffix: 'かない', replacements: ['く'], reason: 'godan negative' },
   { suffix: 'がない', replacements: ['ぐ'], reason: 'godan negative' },
   { suffix: 'さない', replacements: ['す'], reason: 'godan negative' },
@@ -115,6 +121,19 @@ const RULES: DeconjugationRule[] = [
   { suffix: 'したら', replacements: ['す', 'する'], reason: 'godan/suru conditional shitara' },
   { suffix: 'よう', replacements: ['る'], reason: 'ichidan volitional' },
 ];
+
+// Map godan e-row potential stem ending kana to dictionary u-row kana (引き落とせる -> 引き落とす, 行ける -> 行く, 勝てる -> 勝つ)
+const E_ROW_TO_U_ROW: Record<string, string> = {
+  え: 'う',
+  け: 'く',
+  げ: 'ぐ',
+  せ: 'す',
+  て: 'つ',
+  ね: 'ぬ',
+  べ: 'ぶ',
+  め: 'む',
+  れ: 'る',
+};
 
 // Map godan o-row volitional stem ending kana to dictionary u-row kana (行こう -> 行く, 飲もう -> 飲む)
 const O_ROW_TO_U_ROW: Record<string, string> = {
@@ -230,14 +249,22 @@ function deconjugateStep(word: string): string[] {
     }
   }
 
-  // Handle godan passive / causative / negative (a-row -> u-row): 言われる -> 言う, 飲ませる -> 飲む
-  for (const aSuffix of ['れる', 'せる', 'ない', 'なかった', 'ず', 'ぬ']) {
+  // Handle godan passive / causative / negative (a-row -> u-row): 言われる -> 言う, 飲ませる -> 飲む, 知らねえ -> 知る
+  for (const aSuffix of ['れる', 'せる', 'ない', 'ねえ', 'ねぇ', 'ねー', 'なかった', 'ず', 'ぬ']) {
     if (word.length > aSuffix.length + 1 && word.endsWith(aSuffix)) {
       const stem = word.slice(0, -aSuffix.length);
       const lastChar = stem.slice(-1);
       if (A_ROW_TO_U_ROW[lastChar]) {
         next.add(stem.slice(0, -1) + A_ROW_TO_U_ROW[lastChar]);
       }
+    }
+  }
+
+  // Handle godan potential (e-row + る -> u-row): 引き落とせる -> 引き落とす, 行ける -> 行く, 勝てる -> 勝つ
+  if (word.length > 2 && word.endsWith('る')) {
+    const prevChar = word.slice(-2, -1);
+    if (E_ROW_TO_U_ROW[prevChar]) {
+      next.add(word.slice(0, -2) + E_ROW_TO_U_ROW[prevChar]);
     }
   }
 
