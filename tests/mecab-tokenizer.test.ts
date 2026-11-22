@@ -20,6 +20,9 @@ describe('MeCab / Kuromoji tokenizer on real anime subtitles (とある暗部の
       { line: 'あとは稼いだ金を元手に', expectedSurface: '稼いだ', expectedBase: '稼ぐ' },
       { line: '相手を見定める。', expectedSurface: '見定める', expectedBase: '見定める' },
       { line: '口座から引き落とせ！', expectedSurface: '引き落とせ', expectedBase: '引き落とす' },
+      { line: '金が引き落とせねえんだよ！', expectedSurface: '引き落とせねえ', expectedBase: '引き落とせる' },
+      { line: '変えちまえばいいんだよ', expectedSurface: '変えちまえば', expectedBase: '変える' },
+      { line: '混ざっちまったら終わりだ', expectedSurface: '混ざっちまったら', expectedBase: '混ざる' },
       { line: '食べさせられたくなかったんだ', expectedSurface: '食べさせられたくなかった', expectedBase: '食べる' },
       { line: 'お姉ちゃんに任せておきなさい！', expectedSurface: '任せておきなさい', expectedBase: '任せる' },
       { line: '逃げられると思ってるの？', expectedSurface: '思ってる', expectedBase: '思う' },
@@ -62,5 +65,18 @@ describe('MeCab / Kuromoji tokenizer on real anime subtitles (とある暗部の
     const morphemes = await analyzeWithMeCab('それは出来るよ。');
     const tokens = buildTokensFromMorphemes(morphemes, vocab);
     expect(tokens.find((t) => t.surface === '出来る')?.status).toBe('known');
+  });
+
+  it('merges split copulas (だった/でしょう/だろう) and ignores grammar ん/の and stray small kana', async () => {
+    const m1 = await analyzeWithMeCab('そうだったんでしょう？なっ！');
+    const t1 = buildTokensFromMorphemes(m1);
+    expect(t1.map((t) => t.surface)).toContain('だった');
+    expect(t1.map((t) => t.surface)).toContain('でしょう');
+    expect(t1.find((t) => t.surface === 'ん')?.status).toBe('ignored');
+    for (const tok of t1) {
+      if (/^[ぁぃぅぇぉっ]+$/.test(tok.surface)) {
+        expect(tok.isWord).toBe(false);
+      }
+    }
   });
 });

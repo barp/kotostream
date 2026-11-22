@@ -23,6 +23,8 @@ export function katakanaToHiragana(str: string): string {
 }
 
 const TE_CONNECTORS = new Set(['て', 'で', 'ちゃ', 'じゃ', 'ば']);
+const SEPARATE_COPULA_SURFACES = new Set(['だ', 'です', 'だろ', 'だろう', 'でしょ', 'でしょう', 'なら']);
+const NON_WORD_KANA_REGEX = /^[ぁぃぅぇぉっゃゅょァィゥェォッャュョー〜～]+$/;
 
 /**
  * Merges raw MeCab / Kuromoji IPADIC morphemes into natural Japanese immersion tokens
@@ -83,7 +85,7 @@ export function buildTokensFromMorphemes(
     const reading = m.reading && m.reading !== '*' ? katakanaToHiragana(m.reading) : surface;
     const basic = m.basic_form && m.basic_form !== '*' ? m.basic_form : surface;
 
-    // 1. Verb or i-adjective head -> absorb full conjugation chain (passive, causative, progressive, negative, past, volitional, colloquial 〜ちまう/〜ちゃう)
+    // 1. Verb or i-adjective head -> absorb conjugation chain
     if (
       (m.pos === '動詞' && m.pos_detail_1 === '自立') ||
       (m.pos === '形容詞' && m.pos_detail_1 === '自立')
@@ -91,25 +93,33 @@ export function buildTokensFromMorphemes(
       let combinedSurface = surface;
       let combinedReading = reading;
       let lastForm = m.conjugated_form ?? '';
+      let lastSurface = surface;
 
       while (i + 1 < morphemes.length) {
         const next = morphemes[i + 1];
         const nextRead =
           next.reading && next.reading !== '*' ? katakanaToHiragana(next.reading) : next.surface_form;
+        const nextBasic = next.basic_form && next.basic_form !== '*' ? next.basic_form : next.surface_form;
 
-        // Auxiliary verbs (た, だ, たら, ない, ます, う, よう, たい, ぬ, ん, etc.)
-        // Don't attach copula だ/です onto an already-finished dictionary form (基本形)
-        const isAuxiliary =
-          next.pos === '助動詞' &&
-          !((next.surface_form === 'だ' || next.surface_form === 'です') && lastForm === '基本形');
+        // Auxiliary verbs (た, だ, たら, ない, ねえ, ます, う, よう, たい, ぬ, ん)
+        // Do NOT attach sentence-final copulas (だろ/でしょ/です/だ after 基本形) onto a finished verb
+        const isSentenceCopula =
+          SEPARATE_COPULA_SURFACES.has(next.surface_form) &&
+          !(next.surface_form === 'だ' && lastForm !== '基本形' && !lastSurface.endsWith('ば'));
+        const isAuxiliary = next.pos === '助動詞' && !isSentenceCopula;
 
         // Verb suffixes & non-independent verbs (られ, れ, させ, せ, ちまお, ちゃっ, いる, てる, しまう, おく)
         const isAttachedVerb =
-          next.pos === '動詞' && (next.pos_detail_1 === '接尾' || next.pos_detail_1 === '非自立');
+          next.pos === '動詞' &&
+          (next.pos_detail_1 === '接尾' || next.pos_detail_1 === '非自立') &&
+          !lastSurface.endsWith('ば');
 
-        // Attached non-independent adjectives (ない, なかった)
-        const isAttachedAdj =
-          next.pos === '形容詞' && next.pos_detail_1 === '非自立';
+        // Only attach negative non-independent adjectives (ない / ねえ), NOT いい / ほしい!
+        const isAttachedNegAdj =
+          next.pos === '形容詞' &&
+          next.pos_detail_1 === '非自立' &&
+          (nextBasic === 'ない' || next.surface_form === 'ねえ' || next.surface_form === 'ねぇ') &&
+          !lastSurface.endsWith('ば');
 
         // Te-form / conditional connectors (て, で, ちゃ, じゃ, ば)
         const isTeConnector =
@@ -117,10 +127,11 @@ export function buildTokensFromMorphemes(
           next.pos_detail_1 === '接続助詞' &&
           TE_CONNECTORS.has(next.surface_form);
 
-        if (isAuxiliary || isAttachedVerb || isAttachedAdj || isTeConnector) {
+        if (isAuxiliary || isAttachedVerb || isAttachedNegAdj || isTeConnector) {
           combinedSurface += next.surface_form;
           combinedReading += nextRead;
           lastForm = next.conjugated_form ?? lastForm;
+          lastSurface = next.surface_form;
           i++;
         } else {
           break;
@@ -133,12 +144,35 @@ export function buildTokensFromMorphemes(
         reading: combinedReading,
         pos: m.pos,
         posDetail1: m.pos_detail_1,
-        isWord: isJapaneseWord(combinedSurface),
+        isWord: isJapaneseWord(combinedSurface) && !NON_WORD_KANA_REGEX.test(combinedSurface),
       });
       continue;
     }
 
-    // 2. Honorific prefix お/ご + Noun (e.g. お + 姉ちゃん -> お姉ちゃん, ご + 飯 -> ご飯)
+    // 2. Standalone copula/auxiliary chains (だっ+た -> だった, でし+た -> でした, でしょ+う -> でしょう, だろ+う -> だろう)
+    if (m.pos === '助動詞' && i + 1 < morphemes.length && morphemes[i + 1].pos === '助動詞') {
+      let combinedSurface = surface;
+      let combinedReading = reading;
+      while (i + 1 < morphemes.length && morphemes[i + 1].pos === '助動詞') {
+        const next = morphemes[i + 1];
+        const nextRead =
+          next.reading && next.reading !== '*' ? katakanaToHiragana(next.reading) : next.surface_form;
+        combinedSurface += next.surface_form;
+        combinedReading += nextRead;
+        i++;
+      }
+      units.push({
+        surface: combinedSurface,
+        baseForm: combinedSurface,
+        reading: combinedReading,
+        pos: '助動詞',
+        posDetail1: '*',
+        isWord: true,
+      });
+      continue;
+    }
+
+    // 3. Honorific prefix お/ご + Noun (e.g. お + 姉ちゃん -> お姉ちゃん, ご + 飯 -> ご飯)
     if (
       m.pos === '接頭詞' &&
       m.pos_detail_1 === '名詞接続' &&
@@ -161,8 +195,9 @@ export function buildTokensFromMorphemes(
       continue;
     }
 
-    // 3. Everything else (nouns, adverbs, particles, punctuation, etc.)
-    const isSymbol = m.pos === '記号' || !isJapaneseWord(surface);
+    // 4. Everything else (nouns, adverbs, particles, punctuation, stray small kana)
+    const isSymbol =
+      m.pos === '記号' || !isJapaneseWord(surface) || NON_WORD_KANA_REGEX.test(surface);
     units.push({
       surface,
       baseForm: basic,
@@ -173,7 +208,7 @@ export function buildTokensFromMorphemes(
     });
   }
 
-  // Pass 2: Dictionary-verified compound merging (e.g. 廃 + 課金 -> 廃課金)
+  // Pass 2: Dictionary-verified compound merging (e.g. 廃 + 課金 -> 廃課金, 依頼 + 人 -> 依頼人)
   const finalUnits: MergedUnit[] = [];
   for (let i = 0; i < units.length; i++) {
     const cur = units[i];
@@ -205,10 +240,9 @@ export function buildTokensFromMorphemes(
       };
     }
 
-    const candidates = Array.from(new Set([u.baseForm, u.surface, ...deconjugate(u.surface)]));
+    const candidates = Array.from(new Set([u.baseForm, u.surface, ...deconjugate(u.baseForm), ...deconjugate(u.surface)]));
     const localEntry = lookupLocal(u.baseForm) ?? lookupLocal(u.surface);
 
-    // For baseForm reading (used to match できる <-> 出来る), prefer dictionary reading or unit reading
     const baseReading =
       readingCache[u.baseForm] ||
       localEntry?.reading ||
@@ -225,6 +259,9 @@ export function buildTokensFromMorphemes(
       readingCache[baseForm] ||
       localEntry?.reading;
 
+    const isGrammarNominalizer =
+      u.pos === '名詞' && u.posDetail1 === '非自立' && (u.surface === 'ん' || u.surface === 'の');
+
     let status: WordStatus = 'unknown';
     if (vocabHit) {
       status = vocabHit.status;
@@ -232,6 +269,7 @@ export function buildTokensFromMorphemes(
       u.pos === '助詞' ||
       u.pos === '助動詞' ||
       u.pos === 'フィラー' ||
+      isGrammarNominalizer ||
       PARTICLE_SET.has(u.surface) ||
       PARTICLE_SET.has(baseForm)
     ) {
