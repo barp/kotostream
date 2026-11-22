@@ -278,6 +278,7 @@ export type ExtensionMessage =
   | { type: 'CAPTURE_STATE_CHANGED'; state: CaptureState; tabId?: number }
   | { type: 'SUBTITLE_RECEIVED'; subtitle: SubtitleLine; tabId?: number }
   | { type: 'LOOKUP_WORD'; word: string; surface?: string; exactOnly?: boolean }
+  | { type: 'TOKENIZE_TEXT'; text: string }
   | { type: 'TRANSLATE_SENTENCE'; sentence: string; targetWord?: string }
   | { type: 'CAPTURE_SCREENSHOT' }
   | { type: 'REQUEST_RECENT_AUDIO'; durationMs?: number }

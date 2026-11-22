@@ -5,6 +5,10 @@ import { invokeAnkiConnect } from '../core/anki';
 import { transcribeAudioChunk, transcribeBatchChunkWithTimestamps } from './stt';
 import { translateJapaneseSentence } from './translate';
 import { downloadJimakuSubtitle, listJimakuFiles, searchJimakuEntries } from './jimaku';
+import { analyzeWithMeCab, getMeCabTokenizer } from './mecab';
+
+// Pre-warm MeCab IPADIC dictionary in background so tokenization is instant (<1ms)
+void getMeCabTokenizer().catch(() => {});
 
 const OFFSCREEN_DOCUMENT_PATH = 'src/offscreen/offscreen.html';
 
@@ -340,6 +344,15 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
       case 'LOOKUP_WORD': {
         const entry = await handleWordLookup(message.word, message.surface, message.exactOnly);
         return { entry };
+      }
+
+      case 'TOKENIZE_TEXT': {
+        try {
+          const morphemes = await analyzeWithMeCab(message.text);
+          return { morphemes };
+        } catch (err) {
+          return { error: err instanceof Error ? err.message : 'MeCab tokenization failed' };
+        }
       }
 
       case 'TRANSLATE_SENTENCE': {

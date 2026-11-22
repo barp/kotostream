@@ -157,6 +157,14 @@ async function runBuild() {
     fs.writeFileSync(path.join(iconsDir, `icon${size}.png`), createPngBuffer(size));
   }
 
+  // 3b. Copy Kuromoji MeCab IPADIC dictionary files into dist/dict/
+  const srcDictDir = path.join(rootDir, 'node_modules/@sglkc/kuromoji/dict');
+  const distDictDir = path.join(distDir, 'dict');
+  fs.mkdirSync(distDictDir, { recursive: true });
+  for (const file of fs.readdirSync(srcDictDir)) {
+    fs.copyFileSync(path.join(srcDictDir, file), path.join(distDictDir, file));
+  }
+
   // 4. Write manifest.json
   const manifestJson = {
     manifest_version: 3,

@@ -14,6 +14,7 @@ import type {
   WordStatus,
 } from '../../types';
 import { findCandidateCompounds, findVocabEntry, tokenizeJapanese } from '../../core/tokenizer';
+import { buildTokensFromMorphemes, type KuromojiMorpheme } from '../../core/mecab-tokenizer';
 import { deconjugate } from '../../core/deconjugator';
 import { lookupLocal } from '../../core/dictionary';
 import { parseSubtitleFile, findActiveSubtitlesAtTime } from '../../core/subtitle-parser';
@@ -108,6 +109,8 @@ export class OverlayManager {
   private vocabMap: Record<string, VocabEntry> = {};
   private readingCache: Record<string, string> = {};
   private entryCache = new Map<string, DictionaryEntry>();
+  private morphemeCache = new Map<string, KuromojiMorpheme[]>();
+  private pendingMorphemeRequests = new Set<string>();
   private verifiedCompounds = new Set<string>();
   private checkedCompounds = new Set<string>();
   private captureState: CaptureState = { status: 'idle' };
@@ -461,6 +464,18 @@ export class OverlayManager {
           text: activeCues.map((c) => c.text.replace(/\n/g, ' ')).join('\n'),
         };
         this.setSubtitle(combinedLine, false);
+
+        // Pre-tokenize the next 3 upcoming cues in the background via MeCab so they appear in 0ms!
+        const lastActive = activeCues[activeCues.length - 1];
+        const idx = this.loadedFileSubtitles.findIndex((c) => c.id === lastActive.id);
+        if (idx >= 0) {
+          for (let k = 1; k <= 3; k++) {
+            const upcoming = this.loadedFileSubtitles[idx + k];
+            if (upcoming) {
+              this.requestMeCabTokenization(upcoming.text.replace(/\n/g, ' '));
+            }
+          }
+        }
       }
     } else if (this.currentSubtitle?.source === 'file') {
       this.currentSubtitle = null;
@@ -602,12 +617,24 @@ export class OverlayManager {
         rowEl.classList.add(rowIdx === 0 ? 'ks-speaker-top' : 'ks-speaker-bottom');
       }
 
-      const tokens = tokenizeJapanese(
-        lineText,
-        this.vocabMap,
-        this.readingCache,
-        this.verifiedCompounds
-      );
+      const cachedMorphemes = this.morphemeCache.get(lineText);
+      const tokens = cachedMorphemes
+        ? buildTokensFromMorphemes(
+            cachedMorphemes,
+            this.vocabMap,
+            this.readingCache,
+            this.verifiedCompounds
+          )
+        : tokenizeJapanese(
+            lineText,
+            this.vocabMap,
+            this.readingCache,
+            this.verifiedCompounds
+          );
+
+      if (!cachedMorphemes) {
+        this.requestMeCabTokenization(lineText, this.currentSubtitle?.id);
+      }
       allTokens.push(...tokens);
 
       for (const token of tokens) {
@@ -664,6 +691,33 @@ export class OverlayManager {
 
     // Silently prefetch dictionary entries for words in this subtitle so hovering is instant (0ms)
     this.prefetchSubtitleWords(allTokens);
+  }
+
+  private requestMeCabTokenization(lineText: string, renderedSubId?: string) {
+    if (!lineText.trim() || this.morphemeCache.has(lineText) || this.pendingMorphemeRequests.has(lineText)) {
+      return;
+    }
+    this.pendingMorphemeRequests.add(lineText);
+    void safeSendMessage<{ morphemes?: KuromojiMorpheme[] }>({
+      type: 'TOKENIZE_TEXT',
+      text: lineText,
+    }).then((res) => {
+      this.pendingMorphemeRequests.delete(lineText);
+      if (res?.morphemes && res.morphemes.length > 0) {
+        this.morphemeCache.set(lineText, res.morphemes);
+        if (this.morphemeCache.size > 400) {
+          const firstKey = this.morphemeCache.keys().next().value;
+          if (firstKey) this.morphemeCache.delete(firstKey);
+        }
+        if (
+          renderedSubId &&
+          this.currentSubtitle?.id === renderedSubId &&
+          !this.popoverEl.classList.contains('ks-open')
+        ) {
+          this.renderCurrentSubtitle();
+        }
+      }
+    });
   }
 
   private prefetchSubtitleWords(tokens: Token[]) {
