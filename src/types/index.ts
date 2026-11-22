@@ -268,6 +268,18 @@ export type CaptureState =
   | { status: 'idle' }
   | { status: 'starting' }
   | { status: 'buffering'; tabId: number }
+  | {
+      status: 'prescanning';
+      tabId: number;
+      phase: 'scanning' | 'finalizing';
+      playbackRate: number;
+      currentTimeSec: number;
+      durationSec: number;
+      progress: number;
+      chunksCompleted: number;
+      chunksTotal: number;
+      linesGenerated: number;
+    }
   | { status: 'listening'; tabId: number; lastActivityAt?: number; lastLatencyMs?: number }
   | { status: 'transcribing'; tabId: number; lastLatencyMs?: number }
   | { status: 'error'; message: string };
@@ -284,11 +296,46 @@ export type ExtensionMessage =
   | { type: 'TRANSLATE_SENTENCE'; sentence: string; targetWord?: string }
   | { type: 'CAPTURE_SCREENSHOT' }
   | { type: 'REQUEST_RECENT_AUDIO'; durationMs?: number }
-  | { type: 'OFFSCREEN_START_AUDIO'; streamId: string; tabId: number; settings: SttSettings; mode: 'live_stt' | 'buffer_only' }
+  | {
+      type: 'OFFSCREEN_START_AUDIO';
+      streamId: string;
+      tabId: number;
+      settings: SttSettings;
+      mode: 'live_stt' | 'buffer_only' | 'prescan';
+      playbackRate?: number;
+    }
+  | { type: 'OFFSCREEN_SET_MODE'; mode: 'buffer_only' | 'prescan'; playbackRate?: number }
+  | {
+      type: 'OFFSCREEN_PRESCAN_SYNC';
+      currentTimeSec: number;
+      playbackRate: number;
+      playing: boolean;
+      flushNow?: boolean;
+    }
   | { type: 'OFFSCREEN_STOP_AUDIO' }
   | { type: 'OFFSCREEN_UPDATE_SETTINGS'; settings: SttSettings }
   | { type: 'OFFSCREEN_AUDIO_CHUNK'; tabId: number; audioBase64: string; mimeType: string; durationMs: number; rms: number; silenceGapMs: number }
+  | {
+      type: 'OFFSCREEN_PRESCAN_CHUNK';
+      tabId: number;
+      audioBase64: string;
+      mimeType: string;
+      chunkStartSec: number;
+      chunkEndSec: number;
+      chunkIndex: number;
+      rms: number;
+    }
   | { type: 'OFFSCREEN_GET_RECENT_AUDIO'; durationMs?: number }
+  | { type: 'PRESCAN_START_VIDEO'; targetRate: number }
+  | { type: 'PRESCAN_STOP_VIDEO'; rewindToStart?: boolean }
+  | {
+      type: 'PRESCAN_VIDEO_STATUS';
+      currentTimeSec: number;
+      durationSec: number;
+      playbackRate: number;
+      playing: boolean;
+      ended: boolean;
+    }
   | { type: 'ANKI_REQUEST'; action: string; params?: Record<string, unknown>; url?: string }
   | { type: 'JIMAKU_SEARCH'; query: string }
   | { type: 'JIMAKU_LIST_FILES'; entryId: number; episode?: number }

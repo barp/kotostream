@@ -547,13 +547,18 @@ export class OverlayManager {
 
   public updateCaptureState(state: CaptureState) {
     this.captureState = state;
-    this.dotEl.className = `ks-dot ${state.status}`;
+    this.dotEl.className = `ks-dot ${state.status === 'prescanning' ? 'transcribing' : state.status}`;
 
-    const isActive = state.status === 'listening' || state.status === 'transcribing' || state.status === 'starting';
+    const isActive =
+      state.status === 'prescanning' ||
+      state.status === 'listening' ||
+      state.status === 'transcribing' ||
+      state.status === 'starting';
     this.toolbarEl.classList.toggle('ks-active', isActive);
 
     if (isActive) {
-      this.toggleCaptureBtn.textContent = 'Stop AI Subs';
+      this.toggleCaptureBtn.textContent =
+        state.status === 'prescanning' ? 'Cancel AI Scan' : 'Stop AI Subs';
       this.toggleCaptureBtn.className = 'ks-btn ks-btn-danger';
     } else {
       this.toggleCaptureBtn.textContent = 'Start AI Subs';
@@ -563,6 +568,16 @@ export class OverlayManager {
     this.statusPillEl.className = 'ks-status-pill';
     if (state.status === 'buffering') {
       this.statusPillEl.textContent = '🔊 Audio buffer ready';
+    } else if (state.status === 'prescanning') {
+      const pct = Math.round(state.progress * 100);
+      const rateLabel = Number.isInteger(state.playbackRate)
+        ? `${state.playbackRate}x`
+        : `${state.playbackRate.toFixed(1)}x`;
+      if (state.phase === 'finalizing') {
+        this.statusPillEl.textContent = `Finalizing AI subs… (${state.linesGenerated} lines)`;
+      } else {
+        this.statusPillEl.textContent = `🔇 Scanning ${rateLabel} · ${pct}% · ${state.linesGenerated} lines`;
+      }
     } else if (state.status === 'listening') {
       this.statusPillEl.textContent = state.lastLatencyMs
         ? `Listening · ${state.lastLatencyMs}ms`
@@ -1429,6 +1444,7 @@ export class OverlayManager {
 
   private async toggleLiveCapture() {
     const isActive =
+      this.captureState.status === 'prescanning' ||
       this.captureState.status === 'listening' ||
       this.captureState.status === 'transcribing' ||
       this.captureState.status === 'starting';

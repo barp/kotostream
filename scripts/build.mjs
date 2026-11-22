@@ -172,7 +172,7 @@ async function runBuild() {
     version: '1.0.0',
     description:
       'Migaku-inspired Japanese immersion toolkit with real-time AI Japanese subtitle generation for Amazon Prime Video, YouTube, Netflix, and more.',
-    permissions: ['storage', 'activeTab', 'tabCapture', 'offscreen', 'tabs', 'scripting'],
+    permissions: ['storage', 'activeTab', 'tabCapture', 'offscreen', 'tabs', 'scripting', 'notifications'],
     host_permissions: [
       'https://*.primevideo.com/*',
       'https://*.amazon.com/*',

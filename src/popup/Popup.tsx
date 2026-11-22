@@ -26,6 +26,13 @@ function detectSiteLabel(url?: string): string {
   }
 }
 
+function formatSecClock(sec: number): string {
+  const s = Math.max(0, Math.floor(sec));
+  const mins = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${mins}:${rem.toString().padStart(2, '0')}`;
+}
+
 export const Popup: React.FC = () => {
   const [tabId, setTabId] = useState<number | undefined>();
   const [tabUrl, setTabUrl] = useState<string>('');
@@ -281,6 +288,7 @@ export const Popup: React.FC = () => {
   };
 
   const isCapturingLive =
+    captureState.status === 'prescanning' ||
     captureState.status === 'listening' ||
     captureState.status === 'transcribing' ||
     captureState.status === 'starting';
@@ -514,24 +522,69 @@ export const Popup: React.FC = () => {
         )}
       </div>
 
-      {/* Sentence Audio Buffer & Live AI Fallback Section */}
+      {/* Sentence Audio Buffer & Live AI Pre-Scan Section */}
       <div className="card">
         <div className="capture-status">
-          <span className={`dot ${captureState.status === 'buffering' ? 'listening' : captureState.status}`} />
+          <span
+            className={`dot ${
+              captureState.status === 'buffering'
+                ? 'listening'
+                : captureState.status === 'prescanning'
+                  ? 'transcribing'
+                  : captureState.status
+            }`}
+          />
           <span>
             {captureState.status === 'idle' && 'Sentence Audio Buffer: Off'}
             {captureState.status === 'buffering' && '🔊 Sentence Audio Buffer: Active (15s local)'}
-            {captureState.status === 'starting' && 'Connecting to tab audio…'}
+            {captureState.status === 'starting' && 'Starting silent AI pre-scan…'}
+            {captureState.status === 'prescanning' &&
+              (captureState.phase === 'finalizing'
+                ? `Finalizing AI subtitles… (${captureState.linesGenerated} lines)`
+                : `🔇 Silent AI Pre-Scan (${captureState.playbackRate}x) · ${Math.round(captureState.progress * 100)}%`)}
             {captureState.status === 'listening' && 'Live AI Subs + Audio Buffer: Active'}
             {captureState.status === 'transcribing' && 'Generating Japanese subtitles…'}
             {captureState.status === 'error' && 'Capture error'}
           </span>
         </div>
 
+        {captureState.status === 'prescanning' && (
+          <div style={{ marginBottom: 8 }}>
+            <div
+              style={{
+                height: 6,
+                borderRadius: 999,
+                background: 'rgba(148, 163, 184, 0.2)',
+                overflow: 'hidden',
+                marginBottom: 5,
+              }}
+            >
+              <div
+                style={{
+                  height: '100%',
+                  width: `${Math.min(100, Math.max(2, Math.round(captureState.progress * 100)))}%`,
+                  background: 'linear-gradient(90deg, #6366f1, #a855f7)',
+                  transition: 'width 0.3s ease',
+                }}
+              />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#94a3b8' }}>
+              <span>
+                {formatSecClock(captureState.currentTimeSec)} / {formatSecClock(captureState.durationSec)}
+              </span>
+              <span>{captureState.linesGenerated} lines pre-created</span>
+            </div>
+            <div style={{ fontSize: 10, color: '#64748b', marginTop: 3 }}>
+              Sound is muted while scanning. You’ll get a notification as soon as subtitles are ready.
+            </div>
+          </div>
+        )}
+
         <div style={{ display: 'flex', gap: 6 }}>
           <button
             className={`btn ${captureState.status === 'buffering' ? 'btn-danger' : 'btn-primary'}`}
             style={{ fontSize: 12, padding: '7px 8px' }}
+            disabled={captureState.status === 'prescanning'}
             onClick={handleToggleAudioBuffer}
           >
             {captureState.status === 'buffering' ? 'Stop Audio Buffer' : 'Enable Sentence Audio'}
@@ -541,7 +594,11 @@ export const Popup: React.FC = () => {
             style={{ fontSize: 12, padding: '7px 8px' }}
             onClick={handleToggleCapture}
           >
-            {isCapturingLive ? 'Stop AI Subs' : 'Live AI Subs'}
+            {captureState.status === 'prescanning'
+              ? 'Cancel AI Scan'
+              : isCapturingLive
+                ? 'Stop AI Subs'
+                : 'AI Pre-Scan Subs'}
           </button>
         </div>
 

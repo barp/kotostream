@@ -7,6 +7,7 @@ import { netflixAdapter } from './adapters/netflix';
 import { genericAdapter } from './adapters/generic';
 import type { SiteAdapter } from './adapters/base';
 import { OverlayManager } from './overlay/OverlayManager';
+import { startVideoPrescan, stopVideoPrescan } from './prescan';
 
 const ADAPTERS: SiteAdapter[] = [
   primeVideoAdapter,
@@ -132,6 +133,9 @@ async function init() {
       return false;
     } else if (message.type === 'SET_ENABLED') {
       isEnabled = message.enabled;
+      if (!isEnabled) {
+        stopVideoPrescan(false);
+      }
       void getSettings().then((s) => {
         const synced = { ...s, enabled: message.enabled };
         overlay.updateSettings(synced);
@@ -139,6 +143,50 @@ async function init() {
           tryMount();
         }
       });
+      sendResponse({ ok: true });
+      return false;
+    } else if (message.type === 'PRESCAN_START_VIDEO') {
+      if (!isEnabled) {
+        sendResponse({ ok: false, error: 'KotoStream is disabled.' });
+        return false;
+      }
+      const video = adapter.findVideo();
+      if (!video) {
+        sendResponse({ ok: false, error: 'No video player found on this page.' });
+        return false;
+      }
+      tryMount();
+      const rawTitle = adapter.getMediaTitle();
+      const parsed = parseMediaTitle(rawTitle);
+      const displayTitle =
+        parsed.showName && parsed.episodeNumber
+          ? `${parsed.showName} Ep ${parsed.episodeNumber}`
+          : parsed.showName || rawTitle || document.title || 'Episode';
+
+      void startVideoPrescan(video, message.targetRate, (status) => {
+        if (!chrome.runtime?.id) return;
+        chrome.runtime
+          .sendMessage({
+            type: 'PRESCAN_VIDEO_STATUS',
+            ...status,
+          } satisfies ExtensionMessage)
+          .catch(() => {});
+      }).then((res) => {
+        if (res.ok) {
+          sendResponse({
+            ok: true,
+            durationSec: res.durationSec,
+            actualRate: res.actualRate,
+            title: displayTitle,
+            url: window.location.href,
+          });
+        } else {
+          sendResponse(res);
+        }
+      });
+      return true;
+    } else if (message.type === 'PRESCAN_STOP_VIDEO') {
+      stopVideoPrescan(Boolean(message.rewindToStart));
       sendResponse({ ok: true });
       return false;
     }

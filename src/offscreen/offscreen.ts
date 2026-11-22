@@ -1,17 +1,26 @@
 import type { ExtensionMessage, SttSettings } from '../types';
+import {
+  TARGET_SAMPLE_RATE,
+  encodeWav,
+  resampleTo16k,
+  trimSilencePcm,
+  uint8ToBase64,
+} from '../core/audio-dsp';
 
-const TARGET_SAMPLE_RATE = 16000;
 const RING_BUFFER_SECONDS = 15;
 const RING_BUFFER_CAPACITY = TARGET_SAMPLE_RATE * RING_BUFFER_SECONDS;
+const PRESCAN_CHUNK_EPISODE_SEC = 30;
+const PRESCAN_MIN_RMS = 0.0018;
 
 let mediaStream: MediaStream | null = null;
 let audioContext: AudioContext | null = null;
 let processorNode: ScriptProcessorNode | null = null;
+let passthroughGain: GainNode | null = null;
 let muteGain: GainNode | null = null;
 
 let currentTabId: number | null = null;
 let currentSettings: SttSettings | null = null;
-let captureMode: 'live_stt' | 'buffer_only' = 'buffer_only';
+let captureMode: 'live_stt' | 'buffer_only' | 'prescan' = 'buffer_only';
 let isCapturing = false;
 
 // 15-second circular 16kHz mono PCM ring buffer for Migaku-style sentence audio mining
@@ -28,6 +37,16 @@ let lastSpeechSeenAt = 0;
 let previousChunkLastSpeechAt = 0;
 let peakRmsInChunk = 0;
 let silenceSince: number | null = null;
+
+// High-speed silent episode pre-scan state
+let prescanBuffers: Float32Array[] = [];
+let prescanSampleCount = 0;
+let prescanPeakRms = 0;
+let prescanChunkStartSec: number | null = null;
+let prescanLastVideoTimeSec = 0;
+let prescanPlaybackRate = 4;
+let prescanPlaying = false;
+let prescanChunkIndex = 0;
 
 function pushToRingBuffer(samples: Int16Array) {
   for (let i = 0; i < samples.length; i++) {
@@ -51,7 +70,6 @@ function sliceRecentAudioWav(requestedDurationMs = 4500): {
     return {};
   }
 
-  // Read up to requestedDurationMs + 2.5s extra lookback in case the video was paused on hover
   const clampedMs = Math.min(RING_BUFFER_SECONDS * 1000, Math.max(1500, requestedDurationMs));
   const lookbackSamples = Math.min(
     ringFilledSamples,
@@ -64,7 +82,6 @@ function sliceRecentAudioWav(requestedDurationMs = 4500): {
     linear[i] = ringBuffer[(startIdx + i) % RING_BUFFER_CAPACITY];
   }
 
-  // Find the end of actual spoken audio (strip trailing silence after auto-pause)
   const silenceThreshold = 200;
   let speechEnd = linear.length - 1;
   while (speechEnd > 0 && Math.abs(linear[speechEnd]) < silenceThreshold) {
@@ -72,7 +89,7 @@ function sliceRecentAudioWav(requestedDurationMs = 4500): {
   }
 
   if (speechEnd < TARGET_SAMPLE_RATE * 0.25) {
-    return {}; // Ring buffer is all silence
+    return {};
   }
 
   const tailPad = Math.floor(TARGET_SAMPLE_RATE * 0.18);
@@ -93,102 +110,6 @@ function sliceRecentAudioWav(requestedDurationMs = 4500): {
   };
 }
 
-function downsampleTo16k(buffers: Float32Array[], inputSampleRate: number): Int16Array {
-  const totalLen = buffers.reduce((sum, b) => sum + b.length, 0);
-  const merged = new Float32Array(totalLen);
-  let offset = 0;
-  for (const b of buffers) {
-    merged.set(b, offset);
-    offset += b.length;
-  }
-
-  if (inputSampleRate === TARGET_SAMPLE_RATE) {
-    const out = new Int16Array(merged.length);
-    for (let i = 0; i < merged.length; i++) {
-      const s = Math.max(-1, Math.min(1, merged[i]));
-      out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-    }
-    return out;
-  }
-
-  const ratio = inputSampleRate / TARGET_SAMPLE_RATE;
-  const outLength = Math.max(1, Math.floor(merged.length / ratio));
-  const out = new Int16Array(outLength);
-
-  for (let i = 0; i < outLength; i++) {
-    const start = Math.floor(i * ratio);
-    const end = Math.min(merged.length, Math.floor((i + 1) * ratio));
-    let sum = 0;
-    let count = 0;
-    for (let j = start; j < end; j++) {
-      sum += merged[j];
-      count++;
-    }
-    const sample = count > 0 ? sum / count : merged[start] ?? 0;
-    const clamped = Math.max(-1, Math.min(1, sample));
-    out[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
-  }
-
-  return out;
-}
-
-function trimSilencePcm(samples: Int16Array, thresholdAmp = 180): Int16Array {
-  const pad = Math.floor(TARGET_SAMPLE_RATE * 0.14);
-  let start = 0;
-  let end = samples.length - 1;
-
-  while (start < end && Math.abs(samples[start]) < thresholdAmp) start++;
-  while (end > start && Math.abs(samples[end]) < thresholdAmp) end--;
-
-  if (start >= end) return samples;
-  const paddedStart = Math.max(0, start - pad);
-  const paddedEnd = Math.min(samples.length, end + pad);
-  return samples.subarray(paddedStart, paddedEnd);
-}
-
-function encodeWav(samples: Int16Array, sampleRate: number): Uint8Array {
-  const dataSize = samples.length * 2;
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
-
-  const writeStr = (pos: number, str: string) => {
-    for (let i = 0; i < str.length; i++) {
-      view.setUint8(pos + i, str.charCodeAt(i));
-    }
-  };
-
-  writeStr(0, 'RIFF');
-  view.setUint32(4, 36 + dataSize, true);
-  writeStr(8, 'WAVE');
-  writeStr(12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeStr(36, 'data');
-  view.setUint32(40, dataSize, true);
-
-  let pos = 44;
-  for (let i = 0; i < samples.length; i++) {
-    view.setInt16(pos, samples[i], true);
-    pos += 2;
-  }
-
-  return new Uint8Array(buffer);
-}
-
-function uint8ToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-  }
-  return btoa(binary);
-}
-
 function resetChunkState() {
   pcmBuffers = [];
   chunkStartedAt = Date.now();
@@ -196,6 +117,65 @@ function resetChunkState() {
   chunkFirstSpeechAt = 0;
   peakRmsInChunk = 0;
   silenceSince = null;
+}
+
+function resetPrescanState(playbackRate = 4) {
+  prescanBuffers = [];
+  prescanSampleCount = 0;
+  prescanPeakRms = 0;
+  prescanChunkStartSec = null;
+  prescanLastVideoTimeSec = 0;
+  prescanPlaybackRate = Math.max(1, playbackRate);
+  prescanPlaying = false;
+  prescanChunkIndex = 0;
+}
+
+function flushPrescanChunk(overrideEndSec?: number) {
+  if (!isCapturing || captureMode !== 'prescan' || currentTabId === null || !audioContext) return;
+  if (prescanBuffers.length === 0 || prescanSampleCount === 0) return;
+
+  const rate = Math.max(1, prescanPlaybackRate);
+  const nominalEffectiveRate = audioContext.sampleRate / rate;
+  const nominalDurationSec = prescanSampleCount / nominalEffectiveRate;
+  const startSec = prescanChunkStartSec ?? Math.max(0, prescanLastVideoTimeSec - nominalDurationSec);
+  const endSec =
+    overrideEndSec !== undefined && overrideEndSec > startSec
+      ? overrideEndSec
+      : startSec + nominalDurationSec;
+
+  const capturedBuffers = prescanBuffers;
+  const peakRms = prescanPeakRms;
+  const idx = prescanChunkIndex++;
+
+  prescanBuffers = [];
+  prescanSampleCount = 0;
+  prescanPeakRms = 0;
+  prescanChunkStartSec = endSec;
+
+  // Skip near-silent chunks (< 0.4s or pure silence) to save API cost & prevent Whisper hallucinations
+  if (nominalDurationSec < 0.4 || peakRms < PRESCAN_MIN_RMS) {
+    return;
+  }
+
+  // Restore 1x speed & original pitch by resampling from (sampleRate / playbackRate) -> 16 kHz!
+  const pcm16 = resampleTo16k(capturedBuffers, nominalEffectiveRate);
+  if (pcm16.length < TARGET_SAMPLE_RATE * 0.3) return;
+
+  const wavBytes = encodeWav(pcm16, TARGET_SAMPLE_RATE);
+  const audioBase64 = uint8ToBase64(wavBytes);
+
+  chrome.runtime
+    .sendMessage({
+      type: 'OFFSCREEN_PRESCAN_CHUNK',
+      tabId: currentTabId,
+      audioBase64,
+      mimeType: 'audio/wav',
+      chunkStartSec: startSec,
+      chunkEndSec: endSec,
+      chunkIndex: idx,
+      rms: peakRms,
+    } satisfies ExtensionMessage)
+    .catch(() => {});
 }
 
 function flushChunkForLiveStt() {
@@ -219,7 +199,7 @@ function flushChunkForLiveStt() {
 
   if (!hadSpeech || capturedBuffers.length === 0) return;
 
-  const rawPcm16 = downsampleTo16k(capturedBuffers, sampleRate);
+  const rawPcm16 = resampleTo16k(capturedBuffers, sampleRate);
   const pcm16 = trimSilencePcm(rawPcm16);
   if (pcm16.length < TARGET_SAMPLE_RATE * 0.25) return;
 
@@ -243,7 +223,8 @@ async function startCapture(
   streamId: string,
   tabId: number,
   settings: SttSettings,
-  mode: 'live_stt' | 'buffer_only'
+  mode: 'live_stt' | 'buffer_only' | 'prescan',
+  playbackRate = 4
 ) {
   stopCapture();
 
@@ -270,14 +251,20 @@ async function startCapture(
 
   const source = audioContext.createMediaStreamSource(mediaStream);
 
-  // Route captured audio directly back to speakers so the user hears Amazon Prime / video normally!
-  source.connect(audioContext.destination);
+  // Speaker passthrough gain:
+  // - 0 during silent high-speed episode pre-scan (user hears NOTHING while it scans!)
+  // - 1 during normal watching / buffer_only mode (user hears video normally)
+  passthroughGain = audioContext.createGain();
+  passthroughGain.gain.value = mode === 'prescan' ? 0 : 1;
+  source.connect(passthroughGain);
+  passthroughGain.connect(audioContext.destination);
 
   processorNode = audioContext.createScriptProcessor(2048, 2, 1);
   muteGain = audioContext.createGain();
   muteGain.gain.value = 0;
 
   resetChunkState();
+  resetPrescanState(playbackRate);
   ringWritePos = 0;
   ringFilledSamples = 0;
   isCapturing = true;
@@ -296,13 +283,35 @@ async function startCapture(
       sumSq += sample * sample;
     }
 
-    // Always feed the local 15-second PCM ring buffer for Migaku-style sentence audio mining
-    const frame16k = downsampleTo16k([mono], audioContext.sampleRate);
+    const rms = Math.sqrt(sumSq / left.length);
+
+    // High-speed silent episode pre-scan mode
+    if (captureMode === 'prescan') {
+      if (!prescanPlaying) return;
+
+      if (prescanChunkStartSec === null) {
+        prescanChunkStartSec = prescanLastVideoTimeSec;
+      }
+
+      prescanBuffers.push(mono);
+      prescanSampleCount += mono.length;
+      if (rms > prescanPeakRms) prescanPeakRms = rms;
+
+      const effectiveRate = audioContext.sampleRate / Math.max(1, prescanPlaybackRate);
+      const accumulatedEpisodeSec = prescanSampleCount / effectiveRate;
+
+      if (accumulatedEpisodeSec >= PRESCAN_CHUNK_EPISODE_SEC) {
+        flushPrescanChunk();
+      }
+      return;
+    }
+
+    // Normal mode: always feed the local 15-second PCM ring buffer for Migaku-style sentence audio mining
+    const frame16k = resampleTo16k([mono], audioContext.sampleRate);
     pushToRingBuffer(frame16k);
 
     if (captureMode !== 'live_stt') return;
 
-    const rms = Math.sqrt(sumSq / left.length);
     pcmBuffers.push(mono);
 
     const now = Date.now();
@@ -340,6 +349,24 @@ async function startCapture(
   muteGain.connect(audioContext.destination);
 }
 
+function setCaptureMode(mode: 'buffer_only' | 'prescan', playbackRate?: number) {
+  if (!isCapturing) return;
+  if (captureMode === 'prescan' && mode !== 'prescan') {
+    flushPrescanChunk();
+  }
+  captureMode = mode;
+  if (passthroughGain) {
+    passthroughGain.gain.value = mode === 'prescan' ? 0 : 1;
+  }
+  if (mode === 'prescan') {
+    resetPrescanState(playbackRate ?? 4);
+  } else {
+    // Clear ring buffer so high-speed audio never leaks into sentence audio mining
+    ringWritePos = 0;
+    ringFilledSamples = 0;
+  }
+}
+
 function stopCapture() {
   isCapturing = false;
 
@@ -351,6 +378,15 @@ function stopCapture() {
       // ignore
     }
     processorNode = null;
+  }
+
+  if (passthroughGain) {
+    try {
+      passthroughGain.disconnect();
+    } catch {
+      // ignore
+    }
+    passthroughGain = null;
   }
 
   if (muteGain) {
@@ -375,6 +411,7 @@ function stopCapture() {
   }
 
   resetChunkState();
+  resetPrescanState();
   ringWritePos = 0;
   ringFilledSamples = 0;
   lastSpeechSeenAt = 0;
@@ -384,10 +421,46 @@ function stopCapture() {
 
 chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
   if (message.type === 'OFFSCREEN_START_AUDIO') {
-    startCapture(message.streamId, message.tabId, message.settings, message.mode)
+    startCapture(message.streamId, message.tabId, message.settings, message.mode, message.playbackRate)
       .then(() => sendResponse({ ok: true }))
       .catch((err) => sendResponse({ error: err instanceof Error ? err.message : String(err) }));
     return true;
+  }
+
+  if (message.type === 'OFFSCREEN_SET_MODE') {
+    setCaptureMode(message.mode, message.playbackRate);
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message.type === 'OFFSCREEN_PRESCAN_SYNC') {
+    if (captureMode === 'prescan' && audioContext) {
+      const nextRate = Math.max(1, message.playbackRate);
+      const rateChanged = Math.abs(nextRate - prescanPlaybackRate) > 0.05;
+      const effectiveRate = audioContext.sampleRate / Math.max(1, prescanPlaybackRate);
+      const bufferedEpisodeSec = prescanSampleCount / effectiveRate;
+
+      // Flush cleanly before a playbackRate change or buffering stall (if >= 3s buffered)
+      if ((rateChanged && bufferedEpisodeSec >= 1) || (!message.playing && bufferedEpisodeSec >= 3)) {
+        flushPrescanChunk(message.currentTimeSec);
+      }
+
+      prescanPlaybackRate = nextRate;
+      prescanLastVideoTimeSec = message.currentTimeSec;
+      prescanPlaying = message.playing;
+
+      // If starting a fresh chunk after a pause/stall, lock its start time to the exact video.currentTime
+      if (prescanSampleCount === 0) {
+        prescanChunkStartSec = message.currentTimeSec;
+      }
+
+      if (message.flushNow) {
+        flushPrescanChunk(message.currentTimeSec);
+        prescanPlaying = false;
+      }
+    }
+    sendResponse({ ok: true });
+    return false;
   }
 
   if (message.type === 'OFFSCREEN_STOP_AUDIO') {

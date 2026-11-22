@@ -310,7 +310,8 @@ export async function transcribeBatchChunkWithTimestamps(
   audioBase64: string,
   mimeType: string,
   chunkOffsetSec: number,
-  settings: SttSettings
+  settings: SttSettings,
+  options?: { showTitle?: string }
 ): Promise<SubtitleLine[]> {
   if (!settings.apiKey.trim()) {
     throw new Error('OpenRouter API key is required for pre-generating subtitles.');
@@ -318,9 +319,10 @@ export async function transcribeBatchChunkWithTimestamps(
 
   // Use highest-quality dedicated STT model for offline batch pre-generation
   const configured = settings.model.trim();
-  const model = isDedicatedSttModel(configured) ? configured : 'openai/whisper-large-v3';
+  const model = isDedicatedSttModel(configured) ? configured : 'openai/whisper-large-v3-turbo';
   const format = mimeType.includes('wav') ? 'wav' : 'webm';
 
+  const promptParts = [options?.showTitle?.trim(), settings.contextPrompt.trim()].filter(Boolean);
   const body: Record<string, unknown> = {
     model,
     input_audio: { data: audioBase64, format },
@@ -328,8 +330,17 @@ export async function transcribeBatchChunkWithTimestamps(
     response_format: 'verbose_json',
     timestamp_granularities: ['segment'],
   };
+  if (promptParts.length > 0) {
+    body.prompt = promptParts.join(' — ');
+  }
 
-  if (model.toLowerCase().includes('mai-transcribe')) {
+  const lowerModel = model.toLowerCase();
+  if (lowerModel.includes('whisper-large-v3')) {
+    body.provider = {
+      order: ['groq'],
+      allow_fallbacks: true,
+    };
+  } else if (lowerModel.includes('mai-transcribe')) {
     body.provider = { options: { azure: { diarization: { enabled: true } } } };
   }
 
