@@ -10,6 +10,57 @@ import { analyzeWithMeCab, getMeCabTokenizer } from './mecab';
 // Pre-warm MeCab IPADIC dictionary in background so tokenization is instant (<1ms)
 void getMeCabTokenizer().catch(() => {});
 
+function syncActionBadge(enabled: boolean) {
+  if (!chrome.action) return;
+  if (enabled) {
+    chrome.action.setBadgeText({ text: '' }).catch(() => {});
+  } else {
+    chrome.action.setBadgeBackgroundColor({ color: '#475569' }).catch(() => {});
+    chrome.action.setBadgeText({ text: 'OFF' }).catch(() => {});
+  }
+}
+
+async function syncEnabledAcrossTabs(enabled: boolean) {
+  try {
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      if (!tab.id || !tab.url || !/^https?:\/\//i.test(tab.url)) continue;
+      const tabId = tab.id;
+      chrome.tabs
+        .sendMessage(tabId, { type: 'SET_ENABLED', enabled } satisfies ExtensionMessage)
+        .catch(() => {
+          // If no live content script responded (e.g. tab was open before an extension reload),
+          // directly remove any orphaned overlay host elements when disabling!
+          if (!enabled) {
+            chrome.scripting
+              .executeScript({
+                target: { tabId },
+                func: () => {
+                  document.querySelectorAll('#kotostream-overlay-host').forEach((el) => el.remove());
+                },
+              })
+              .catch(() => {});
+          }
+        });
+    }
+  } catch {
+    // Ignore tab query errors
+  }
+}
+
+void getSettings().then((s) => syncActionBadge(s.enabled));
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local' || !changes.kotostream_settings) return;
+  void getSettings().then((s) => {
+    syncActionBadge(s.enabled);
+    void syncEnabledAcrossTabs(s.enabled);
+    if (!s.enabled && activeCaptureTabId !== null) {
+      void stopTabCapture();
+    }
+  });
+});
+
 const OFFSCREEN_DOCUMENT_PATH = 'src/offscreen/offscreen.html';
 
 let activeCaptureTabId: number | null = null;
@@ -53,6 +104,9 @@ async function startTabCapture(
   mode: 'live_stt' | 'buffer_only' = 'live_stt'
 ): Promise<CaptureState> {
   const settings = await getSettings();
+  if (!settings.enabled) {
+    return { status: 'idle' };
+  }
   if (mode === 'live_stt' && !settings.stt.apiKey.trim()) {
     const errState: CaptureState = {
       status: 'error',

@@ -49,6 +49,7 @@ async function storageSet(items: Record<string, unknown>): Promise<void> {
 export async function getSettings(): Promise<AppSettings> {
   const saved = await storageGet<Partial<AppSettings>>(STORAGE_KEYS.SETTINGS, {});
   return {
+    enabled: saved.enabled ?? DEFAULT_SETTINGS.enabled,
     stt: {
       ...DEFAULT_SETTINGS.stt,
       ...(saved.stt ?? {}),

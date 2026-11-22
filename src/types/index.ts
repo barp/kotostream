@@ -83,6 +83,7 @@ export interface SubtitleLibrarySettings {
 }
 
 export interface AppSettings {
+  enabled: boolean;
   stt: SttSettings;
   overlay: OverlaySettings;
   anki: AnkiSettings;
@@ -119,6 +120,7 @@ export interface JimakuFile {
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
+  enabled: true,
   stt: {
     provider: 'openrouter',
     apiKey: '',
@@ -293,5 +295,6 @@ export type ExtensionMessage =
   | { type: 'JIMAKU_DOWNLOAD'; url: string }
   | { type: 'GET_PAGE_MEDIA_INFO' }
   | { type: 'APPLY_SUBTITLE_TRACK'; track: SavedSubtitleTrack }
+  | { type: 'SET_ENABLED'; enabled: boolean }
   | { type: 'BATCH_TRANSCRIBE_CHUNK'; audioBase64: string; mimeType: string; chunkOffsetSec: number }
   | { type: 'OPEN_DASHBOARD'; tab?: 'review' | 'vocab' | 'subtitles' | 'settings' | 'playground' };

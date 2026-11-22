@@ -1286,6 +1286,20 @@ export const Dashboard: React.FC = () => {
               <label className="checkbox-row">
                 <input
                   type="checkbox"
+                  checked={settings.enabled}
+                  onChange={(e) =>
+                    setSettings((s) => ({
+                      ...s,
+                      enabled: e.target.checked,
+                    }))
+                  }
+                />
+                <strong>Extension enabled</strong> (show overlay on video pages)
+              </label>
+
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
                   checked={settings.overlay.autoPauseOnHover}
                   onChange={(e) =>
                     setSettings((s) => ({

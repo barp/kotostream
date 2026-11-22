@@ -157,10 +157,10 @@ export const Popup: React.FC = () => {
       } satisfies ExtensionMessage)) as { state?: CaptureState };
       if (capRes?.state) setCaptureState(capRes.state);
 
-      // Detect show title & episode number automatically from the active video tab
+      // Detect show title & episode number automatically from the active video tab (only when enabled)
       let detectedShow = '';
       let detectedEp = '';
-      if (activeTab?.id) {
+      if (loadedSettings.enabled && activeTab?.id) {
         let info:
           | {
               rawTitle?: string;
@@ -205,9 +205,9 @@ export const Popup: React.FC = () => {
       setSearchQuery(detectedShow);
       setEpisodeInput(detectedEp);
 
-      // Auto-search Jimaku if API key is set and we detected a real show title
+      // Auto-search Jimaku if enabled, API key is set, and we detected a real show title
       const ignoredTitles = new Set(['Amazon Prime Video', 'Prime Video', 'YouTube', 'Netflix', 'New Tab', '']);
-      if (loadedSettings.subtitles.jimakuApiKey.trim() && !ignoredTitles.has(detectedShow)) {
+      if (loadedSettings.enabled && loadedSettings.subtitles.jimakuApiKey.trim() && !ignoredTitles.has(detectedShow)) {
         void runJimakuSearch(detectedShow, detectedEp);
       }
     };
@@ -305,6 +305,51 @@ export const Popup: React.FC = () => {
     if (next?.status) setCaptureState(next);
   };
 
+  const isEnabled = settings?.enabled ?? true;
+
+  const handleToggleExtension = async () => {
+    if (!settings) return;
+    const nextEnabled = !settings.enabled;
+    const updated: AppSettings = { ...settings, enabled: nextEnabled };
+    await saveSettings(updated);
+    setSettings(updated);
+
+    if (!nextEnabled) {
+      if (isAudioBufferActive) {
+        const stopped = (await chrome.runtime.sendMessage({
+          type: 'STOP_CAPTURE',
+        } satisfies ExtensionMessage)) as CaptureState;
+        if (stopped?.status) setCaptureState(stopped);
+      }
+      if (tabId) {
+        await chrome.tabs
+          .sendMessage(tabId, { type: 'SET_ENABLED', enabled: false } satisfies ExtensionMessage)
+          .catch(() => {
+            // If an orphaned overlay from before an extension reload is on the page, remove it directly
+            chrome.scripting
+              .executeScript({
+                target: { tabId },
+                func: () => {
+                  document.querySelectorAll('#kotostream-overlay-host').forEach((el) => el.remove());
+                },
+              })
+              .catch(() => {});
+          });
+      }
+    } else if (nextEnabled && tabId) {
+      // Ensure content script is active on this tab when re-enabled
+      await chrome.scripting
+        .executeScript({ target: { tabId }, files: ['content.js'] })
+        .catch(() => {});
+      await chrome.tabs
+        .sendMessage(tabId, { type: 'SET_ENABLED', enabled: true } satisfies ExtensionMessage)
+        .catch(() => {});
+      if (searchQuery.trim() && jimakuEntries.length === 0 && updated.subtitles.jimakuApiKey.trim()) {
+        void runJimakuSearch(searchQuery, episodeInput);
+      }
+    }
+  };
+
   const openDashboard = (tab: 'review' | 'vocab' | 'subtitles' | 'settings' | 'playground') => {
     chrome.runtime.sendMessage({ type: 'OPEN_DASHBOARD', tab } satisfies ExtensionMessage).catch(() => {});
   };
@@ -313,16 +358,43 @@ export const Popup: React.FC = () => {
     <div className="popup">
       <div className="header">
         <div className="brand">
-          <div className="logo">言</div>
+          <div className="logo" style={{ opacity: isEnabled ? 1 : 0.45 }}>言</div>
           <div>
             <div className="brand-title">KotoStream</div>
-            <div className="brand-sub">Japanese Immersion Toolkit</div>
+            <div className="brand-sub">{siteLabel}</div>
           </div>
         </div>
-        <span className="site-badge">{siteLabel}</span>
+        <div className="header-actions">
+          <button
+            type="button"
+            className={`power-toggle ${isEnabled ? 'on' : ''}`}
+            onClick={() => void handleToggleExtension()}
+            title={isEnabled ? 'Disable KotoStream on video pages' : 'Enable KotoStream on video pages'}
+          >
+            <span className="power-knob" />
+            <span>{isEnabled ? 'ON' : 'OFF'}</span>
+          </button>
+        </div>
       </div>
 
-      {/* Automatic Subtitle Matching Section */}
+      {!isEnabled ? (
+        <div className="disabled-banner">
+          <div className="disabled-banner-title">KotoStream is disabled</div>
+          <div className="disabled-banner-sub">
+            Subtitle overlays, word hover popups, and tab audio capture are turned off on all video pages.
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary"
+            style={{ width: 'auto', padding: '7px 16px', fontSize: 12 }}
+            onClick={() => void handleToggleExtension()}
+          >
+            Enable KotoStream
+          </button>
+        </div>
+      ) : (
+        <>
+          {/* Automatic Subtitle Matching Section */}
       <div className="card">
         <div className="section-title">
           <span>Matching Subtitles (Jimaku)</span>
@@ -494,6 +566,8 @@ export const Popup: React.FC = () => {
           </div>
         )}
       </div>
+        </>
+      )}
 
       <div className="stats-grid">
         <div className="stat-tile">

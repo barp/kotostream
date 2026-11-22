@@ -25,11 +25,16 @@ async function init() {
   if ((window as unknown as { __kotostreamInit?: boolean }).__kotostreamInit) return;
   (window as unknown as { __kotostreamInit?: boolean }).__kotostreamInit = true;
 
+  // Clean up any stale overlay host left in the DOM from before an extension reload
+  document.querySelectorAll('#kotostream-overlay-host').forEach((el) => el.remove());
+
   const adapter = selectAdapter();
   const [settings, vocabMap] = await Promise.all([getSettings(), getVocabMap()]);
+  let isEnabled = settings.enabled;
   const overlay = new OverlayManager(adapter, settings, vocabMap);
 
   const tryMount = () => {
+    if (!isEnabled) return;
     const video = adapter.findVideo();
     if (video) {
       overlay.mount(video);
@@ -49,6 +54,7 @@ async function init() {
       observer.disconnect();
       return;
     }
+    if (!isEnabled) return;
     if (mountTimer !== null) return;
     mountTimer = window.setTimeout(() => {
       mountTimer = null;
@@ -62,7 +68,7 @@ async function init() {
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
   document.addEventListener('fullscreenchange', () => {
-    if (!chrome.runtime?.id) return;
+    if (!chrome.runtime?.id || !isEnabled) return;
     setTimeout(tryMount, 80);
   });
 
@@ -71,7 +77,7 @@ async function init() {
   document.addEventListener(
     'mousemove',
     () => {
-      if (!chrome.runtime?.id) return;
+      if (!chrome.runtime?.id || !isEnabled) return;
       const now = Date.now();
       if (now - lastMetaScan > 600) {
         lastMetaScan = now;
@@ -98,6 +104,7 @@ async function init() {
   // Listen to messages from background service worker & popup
   chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
     if (message.type === 'SUBTITLE_RECEIVED') {
+      if (!isEnabled) return false;
       tryMount();
       overlay.setSubtitle(message.subtitle);
     } else if (message.type === 'CAPTURE_STATE_CHANGED') {
@@ -114,9 +121,24 @@ async function init() {
       });
       return false;
     } else if (message.type === 'APPLY_SUBTITLE_TRACK') {
+      if (!isEnabled) {
+        sendResponse({ ok: false });
+        return false;
+      }
       tryMount();
       overlay.applyLoadedTrack(message.track);
       overlay.showToast(`Loaded subtitles: ${message.track.fileName} (${message.track.cues.length} lines)`);
+      sendResponse({ ok: true });
+      return false;
+    } else if (message.type === 'SET_ENABLED') {
+      isEnabled = message.enabled;
+      void getSettings().then((s) => {
+        const synced = { ...s, enabled: message.enabled };
+        overlay.updateSettings(synced);
+        if (isEnabled) {
+          tryMount();
+        }
+      });
       sendResponse({ ok: true });
       return false;
     }
@@ -127,7 +149,13 @@ async function init() {
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'local') return;
     if (changes.kotostream_settings) {
-      void getSettings().then((s) => overlay.updateSettings(s));
+      void getSettings().then((s) => {
+        isEnabled = s.enabled;
+        overlay.updateSettings(s);
+        if (isEnabled) {
+          tryMount();
+        }
+      });
     }
     if (changes.kotostream_vocab) {
       void getVocabMap().then((v) => overlay.updateVocabMap(v));

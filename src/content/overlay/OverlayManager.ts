@@ -362,6 +362,8 @@ export class OverlayManager {
   }
 
   public ensureMounted() {
+    if (!this.settings.enabled) return;
+    this.host.style.display = '';
     const container =
       document.fullscreenElement instanceof HTMLElement
         ? document.fullscreenElement
@@ -374,6 +376,7 @@ export class OverlayManager {
   }
 
   public mount(video: HTMLVideoElement) {
+    if (!this.settings.enabled) return;
     this.video = video;
     this.ensureMounted();
 
@@ -388,8 +391,39 @@ export class OverlayManager {
     }
   }
 
+  public unmount() {
+    if (this.hoverCloseTimer) {
+      clearTimeout(this.hoverCloseTimer);
+      this.hoverCloseTimer = null;
+    }
+    if (this.toastTimer) {
+      clearTimeout(this.toastTimer);
+      this.toastTimer = null;
+    }
+    this.closePopover();
+    this.cardDraft = null;
+    this.modalBackdropEl.classList.remove('ks-open');
+    this.modalBackdropEl.innerHTML = '';
+    this.sidebarEl.classList.remove('ks-open');
+    this.toastEl.classList.remove('ks-visible');
+    this.subtitleBoxEl.classList.add('ks-empty');
+    this.subtitleBoxEl.innerHTML = '';
+    if (this.video) {
+      this.video.removeEventListener('timeupdate', this.handleVideoTimeUpdate);
+    }
+    this.host.style.display = 'none';
+    if (this.host.isConnected) {
+      this.host.remove();
+    }
+    // Also remove any orphaned KotoStream hosts (e.g. left over from before an extension reload)
+    document.querySelectorAll('#kotostream-overlay-host').forEach((el) => el.remove());
+    this.mountedContainer = null;
+  }
+
   private async tryAutoLoadSavedTrack() {
+    if (!this.settings.enabled) return;
     const match = await findSubtitleTrackForUrl(window.location.href);
+    if (!this.settings.enabled) return;
     if (match && match.cues.length > 0) {
       this.applyLoadedTrack(match);
       this.showToast(`Auto-loaded subtitles: ${match.fileName} (${match.cues.length} lines)`);
@@ -486,9 +520,17 @@ export class OverlayManager {
   }
 
   public updateSettings(settings: AppSettings) {
+    const wasEnabled = this.settings.enabled;
     this.settings = settings;
+    if (!settings.enabled) {
+      this.unmount();
+      return;
+    }
     this.applyOverlayStyles();
     this.updateFuriganaLabel();
+    if (!wasEnabled && this.video) {
+      this.mount(this.video);
+    }
     this.renderCurrentSubtitle();
   }
 
@@ -539,6 +581,7 @@ export class OverlayManager {
   }
 
   public setSubtitle(subtitle: SubtitleLine, appendToHistory = true) {
+    if (!this.settings.enabled) return;
     const withTime: SubtitleLine = {
       ...subtitle,
       videoTimeSec: subtitle.videoTimeSec ?? this.video?.currentTime,
@@ -1476,6 +1519,7 @@ export class OverlayManager {
   }
 
   public showToast(message: string) {
+    if (!this.settings.enabled) return;
     this.toastEl.textContent = message;
     this.toastEl.classList.add('ks-visible');
     if (this.toastTimer) clearTimeout(this.toastTimer);
