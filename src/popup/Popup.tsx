@@ -38,6 +38,7 @@ export const Popup: React.FC = () => {
   // Automatic Jimaku subtitle matching state
   const [searchQuery, setSearchQuery] = useState('');
   const [episodeInput, setEpisodeInput] = useState('');
+  const [detectedRawTitle, setDetectedRawTitle] = useState('');
   const [activeTrackName, setActiveTrackName] = useState<string | null>(null);
   const [jimakuEntries, setJimakuEntries] = useState<JimakuEntry[]>([]);
   const [selectedEntry, setSelectedEntry] = useState<JimakuEntry | null>(null);
@@ -160,24 +161,44 @@ export const Popup: React.FC = () => {
       let detectedShow = '';
       let detectedEp = '';
       if (activeTab?.id) {
+        let info:
+          | {
+              rawTitle?: string;
+              showName?: string;
+              episodeNumber?: number;
+              activeTrackName?: string | null;
+            }
+          | undefined;
+
         try {
-          const info = (await chrome.tabs.sendMessage(activeTab.id, {
+          info = (await chrome.tabs.sendMessage(activeTab.id, {
             type: 'GET_PAGE_MEDIA_INFO',
-          } satisfies ExtensionMessage)) as {
-            showName?: string;
-            episodeNumber?: number;
-            activeTrackName?: string | null;
-          };
-          if (info?.showName) detectedShow = info.showName;
-          if (info?.episodeNumber) detectedEp = String(info.episodeNumber);
-          if (info?.activeTrackName) setActiveTrackName(info.activeTrackName);
+          } satisfies ExtensionMessage)) as typeof info;
         } catch {
-          // Content script not injected yet; fall back to tab title
-          if (activeTab.title) {
-            const parsed = parseMediaTitle(activeTab.title);
-            detectedShow = parsed.showName;
-            if (parsed.episodeNumber) detectedEp = String(parsed.episodeNumber);
+          // Content script wasn't active on this tab yet -> inject it and retry once
+          try {
+            await chrome.scripting.executeScript({
+              target: { tabId: activeTab.id },
+              files: ['content.js'],
+            });
+            info = (await chrome.tabs.sendMessage(activeTab.id, {
+              type: 'GET_PAGE_MEDIA_INFO',
+            } satisfies ExtensionMessage)) as typeof info;
+          } catch {
+            // Fall back to tab title below
           }
+        }
+
+        if (info?.rawTitle) setDetectedRawTitle(info.rawTitle);
+        if (info?.showName) detectedShow = info.showName;
+        if (info?.episodeNumber) detectedEp = String(info.episodeNumber);
+        if (info?.activeTrackName) setActiveTrackName(info.activeTrackName);
+
+        if (!detectedShow && activeTab.title) {
+          setDetectedRawTitle(activeTab.title);
+          const parsed = parseMediaTitle(activeTab.title);
+          detectedShow = parsed.showName;
+          if (parsed.episodeNumber) detectedEp = String(parsed.episodeNumber);
         }
       }
 
@@ -344,6 +365,22 @@ export const Popup: React.FC = () => {
                 Find
               </button>
             </form>
+
+            {detectedRawTitle && (
+              <div
+                style={{
+                  fontSize: 10,
+                  color: '#64748b',
+                  marginBottom: 6,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+                title={detectedRawTitle}
+              >
+                Detected: {detectedRawTitle}
+              </div>
+            )}
 
             {jimakuEntries.length > 0 && (
               <div className="chip-row">

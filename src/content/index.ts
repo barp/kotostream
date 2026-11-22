@@ -36,6 +36,8 @@ async function init() {
     } else {
       overlay.ensureMounted();
     }
+    // Keep Prime Video's title/episode cache warm while player controls are visible in the DOM
+    adapter.getMediaTitle();
   };
 
   tryMount();
@@ -49,6 +51,20 @@ async function init() {
   document.addEventListener('fullscreenchange', () => {
     setTimeout(tryMount, 80);
   });
+
+  // Also capture Prime Video's episode header whenever the user hovers over the player (throttled)
+  let lastMetaScan = 0;
+  document.addEventListener(
+    'mousemove',
+    () => {
+      const now = Date.now();
+      if (now - lastMetaScan > 600) {
+        lastMetaScan = now;
+        adapter.getMediaTitle();
+      }
+    },
+    { passive: true }
+  );
 
   // Sync initial capture state from background worker
   chrome.runtime

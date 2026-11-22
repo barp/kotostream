@@ -19,8 +19,9 @@ export function parseMediaTitle(rawTitle: string): ParsedMediaTitle {
 
   // Match common episode patterns on Prime Video, YouTube, Netflix (EN & JP)
   const epPatterns = [
-    /\bS\d+\s*[,·•\s-]*E(?:p\.?)?\s*(\d{1,4})\b/i,
-    /\bSeason\s*\d+\s*[,·•\s-]+E(?:p\.?|pisode)?\s*(\d{1,4})\b/i,
+    /\bS\d+\s*[,·•.\s-]*E(?:p\.?)?\s*(\d{1,4})\b/i,
+    /\bSeason\s*\d+\s*[,·•.\s-]+E(?:p\.?|pisode)?\s*(\d{1,4})\b/i,
+    /\b\d+x(\d{1,4})\b/i,
     /\bEpisode\s*(\d{1,4})\b/i,
     /\bEp\.?\s*(\d{1,4})\b/i,
     /\bE(\d{1,4})\b/i,
