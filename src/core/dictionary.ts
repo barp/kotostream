@@ -233,10 +233,11 @@ interface JishoApiResponse {
 
 /**
  * Looks up a Japanese word via Jisho.org's public JMdict API.
- * When `exactOnly` is true, returns a match ONLY if the exact word appears in JMdict's japanese[] forms.
+ * When `exactOnly` is true, returns a match ONLY if the word (or one of its deconjugated
+ * dictionary forms, e.g. 見定めた -> 見定める) appears as an exact entry in JMdict's japanese[] forms.
  */
 export async function lookupOnJisho(word: string, exactOnly = false): Promise<DictionaryEntry | null> {
-  const candidates = exactOnly ? [word.trim()] : deconjugate(word);
+  const candidates = deconjugate(word);
   const query = candidates[0] || word;
 
   const url = `https://jisho.org/api/v1/search/words?keyword=${encodeURIComponent(query)}`;
@@ -245,14 +246,24 @@ export async function lookupOnJisho(word: string, exactOnly = false): Promise<Di
     throw new Error(`Jisho API error: ${response.status}`);
   }
   const json = (await response.json()) as JishoApiResponse;
+  const candidateSet = new Set(candidates);
+
   if (!json.data || json.data.length === 0) {
-    if (!exactOnly && candidates.length > 1) {
+    if (candidates.length > 1) {
       const retryUrl = `https://jisho.org/api/v1/search/words?keyword=${encodeURIComponent(candidates[1])}`;
       const retryRes = await fetch(retryUrl);
       if (retryRes.ok) {
         const retryJson = (await retryRes.json()) as JishoApiResponse;
         if (retryJson.data && retryJson.data.length > 0) {
-          return parseJishoItem(retryJson.data[0], candidates[1], candidates);
+          const retryMatch = retryJson.data.find((item) =>
+            item.japanese.some(
+              (j) => (j.word && candidateSet.has(j.word)) || (j.reading && candidateSet.has(j.reading))
+            )
+          );
+          if (exactOnly) {
+            return retryMatch ? parseJishoItem(retryMatch, candidates[1], candidates) : null;
+          }
+          return parseJishoItem(retryMatch ?? retryJson.data[0], candidates[1], candidates);
         }
       }
     }
@@ -263,11 +274,6 @@ export async function lookupOnJisho(word: string, exactOnly = false): Promise<Di
   const exactOriginal = json.data.find((item) =>
     item.japanese.some((j) => j.word === query || j.reading === query)
   );
-  if (exactOnly) {
-    return exactOriginal ? parseJishoItem(exactOriginal, query, [query]) : null;
-  }
-
-  const candidateSet = new Set(candidates);
   const exactCandidate =
     exactOriginal ??
     json.data.find((item) =>
@@ -275,6 +281,10 @@ export async function lookupOnJisho(word: string, exactOnly = false): Promise<Di
         (j) => (j.word && candidateSet.has(j.word)) || (j.reading && candidateSet.has(j.reading))
       )
     );
+
+  if (exactOnly) {
+    return exactCandidate ? parseJishoItem(exactCandidate, query, candidates) : null;
+  }
 
   return parseJishoItem(exactCandidate ?? json.data[0], query, candidates);
 }

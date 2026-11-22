@@ -33,5 +33,9 @@ describe('deconjugate', () => {
     expect(deconjugate('食べさせられた')).toContain('食べる');
     expect(deconjugate('言われていたら')).toContain('言う');
     expect(deconjugate('見られたくなかった')).toContain('見る');
+    expect(deconjugate('さらっちまおう')).toContain('さらう');
+    expect(deconjugate('やっちまった')).toContain('やる');
+    expect(deconjugate('死んじまった')).toContain('死ぬ');
+    expect(deconjugate('行っちゃおう')).toContain('行く');
   });
 });

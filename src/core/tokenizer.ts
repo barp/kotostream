@@ -3,7 +3,6 @@ import { deconjugate } from './deconjugator';
 import { hasLocalExact, lookupLocal, PARTICLE_SET } from './dictionary';
 
 const KANJI_REGEX = /[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF]/;
-const PURE_KANJI_REGEX = /^[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF々]+$/;
 const JAPANESE_WORD_REGEX = /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBFー]/;
 
 /**
@@ -15,8 +14,10 @@ const MERGEABLE_AUXILIARIES = new Set([
   'いる', 'い', 'いた', 'てる', 'てた', 'てい', 'でい',
   'れる', 'れ', 'られる', 'られ', 'せる', 'せ', 'させる', 'させ',
   'たら', 'だら', 'ら', 'ば', 'れば',
-  'たい', 'たく', 'たかっ', 'かっ', 'く', 'けれ', 'ければ', 'よう', 'う', 'ん', 'ず',
-  'ちゃう', 'ちゃっ', 'ちゃ', 'じゃう', 'じゃっ', 'じゃ', 'しまっ', 'しまう', 'おく', 'おい',
+  'たい', 'たく', 'たかっ', 'かっ', 'く', 'けれ', 'ければ', 'よう', 'おう', 'う', 'ん', 'っ', 'ず',
+  'ちゃう', 'ちゃっ', 'ちゃ', 'じゃう', 'じゃっ', 'じゃ',
+  'ちまう', 'ちまっ', 'ちま', 'じまう', 'じまっ', 'じま',
+  'しまっ', 'しまう', 'おく', 'おい',
 ]);
 
 let segmenter: Intl.Segmenter | null = null;
@@ -37,8 +38,9 @@ export function isJapaneseWord(text: string): boolean {
 }
 
 /**
- * Finds adjacent kanji word pairs (e.g. 廃 + 課金 -> 廃課金) that could be a real
- * dictionary compound word, so the caller can verify them against JMdict/Jisho.
+ * Finds adjacent Japanese word pairs that could be a real dictionary compound
+ * (both kanji-kanji nouns like 廃+課金 -> 廃課金 AND compound verbs/adjectives like 見+定める -> 見定める,
+ * 取り+出す -> 取り出す, 見+定めた -> 見定めた) so the caller can verify them against JMdict/Jisho.
  */
 export function findCandidateCompounds(tokens: Token[]): string[] {
   const candidates: string[] = [];
@@ -47,10 +49,13 @@ export function findCandidateCompounds(tokens: Token[]): string[] {
     const b = tokens[i + 1];
     if (!a.isWord || !b.isWord) continue;
     if (a.status === 'ignored' || b.status === 'ignored') continue;
-    if (!PURE_KANJI_REGEX.test(a.surface) || !PURE_KANJI_REGEX.test(b.surface)) continue;
+    if (PARTICLE_SET.has(a.surface) || PARTICLE_SET.has(b.surface)) continue;
+
+    // Require at least one token to contain kanji so we catch both 廃+課金 and 見+定める / 取り+出す
+    if (!a.hasKanji && !b.hasKanji) continue;
 
     const combined = a.surface + b.surface;
-    if (combined.length >= 2 && combined.length <= 6) {
+    if (combined.length >= 2 && combined.length <= 8) {
       candidates.push(combined);
     }
   }
@@ -134,11 +139,26 @@ export function tokenizeJapanese(
     });
   }
 
-  const isVerifiedCompound = (word: string): boolean =>
-    verifiedCompounds.has(word) ||
-    hasLocalExact(word) ||
-    Boolean(vocabMap[word]) ||
-    Boolean(readingCache[word]);
+  const isVerifiedCompound = (word: string): boolean => {
+    if (
+      verifiedCompounds.has(word) ||
+      hasLocalExact(word) ||
+      Boolean(vocabMap[word]) ||
+      Boolean(readingCache[word])
+    ) {
+      return true;
+    }
+    // Also match conjugated forms of verified compound verbs (e.g. 見定めた -> 見定める)
+    for (const base of deconjugate(word)) {
+      if (
+        base !== word &&
+        (verifiedCompounds.has(base) || hasLocalExact(base) || Boolean(vocabMap[base]))
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
 
   // Pass 1: Dictionary-verified compound merging (checks 3-segment then 2-segment compounds)
   const compoundMerged: Array<{ text: string; isWordLike: boolean }> = [];
@@ -168,9 +188,27 @@ export function tokenizeJapanese(
   }
 
   // Pass 2: Merge verb/adjective stems with trailing auxiliary chains
-  const merged: Array<{ text: string; isWordLike: boolean }> = [];
-  for (const segItem of compoundMerged) {
-    const prev = merged[merged.length - 1];
+  // First normalize split colloquial 〜ちまう / 〜じまう (e.g. 'ち' + 'ま' / 'まっ', 'じ' + 'ま' / 'まっ')
+  const normalizedAux: Array<{ text: string; isWordLike: boolean }> = [];
+  for (let i = 0; i < compoundMerged.length; i++) {
+    const cur = compoundMerged[i];
+    const next = compoundMerged[i + 1];
+    if (
+      cur.isWordLike &&
+      next?.isWordLike &&
+      (cur.text === 'ち' || cur.text === 'じ') &&
+      (next.text === 'ま' || next.text === 'まっ' || next.text === 'まう' || next.text === 'まえ')
+    ) {
+      normalizedAux.push({ text: cur.text + next.text, isWordLike: true });
+      i += 1;
+      continue;
+    }
+    normalizedAux.push(cur);
+  }
+
+  const auxMerged: Array<{ text: string; isWordLike: boolean }> = [];
+  for (const segItem of normalizedAux) {
+    const prev = auxMerged[auxMerged.length - 1];
     const isCopulaOnNoun =
       (segItem.text === 'だ' || segItem.text === 'で') &&
       prev &&
@@ -187,8 +225,21 @@ export function tokenizeJapanese(
     ) {
       prev.text += segItem.text;
     } else {
-      merged.push({ ...segItem });
+      auxMerged.push({ ...segItem });
     }
+  }
+
+  // Pass 3: Merge verified compound verbs whose second half had auxiliaries attached (e.g. 見 + 定めた -> 見定めた)
+  const merged: Array<{ text: string; isWordLike: boolean }> = [];
+  for (let i = 0; i < auxMerged.length; i++) {
+    const cur = auxMerged[i];
+    const next = auxMerged[i + 1];
+    if (cur.isWordLike && next?.isWordLike && isVerifiedCompound(cur.text + next.text)) {
+      merged.push({ text: cur.text + next.text, isWordLike: true });
+      i += 1;
+      continue;
+    }
+    merged.push(cur);
   }
 
   return merged.map((item) => {

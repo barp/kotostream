@@ -60,6 +60,19 @@ describe('tokenizeJapanese', () => {
     const verified = tokenizeJapanese('彼は廃課金だよ。', {}, {}, new Set(['廃課金']));
     expect(verified.map((t) => t.surface)).toContain('廃課金');
     expect(verified.map((t) => t.surface)).not.toContain('廃課金だ');
+
+    // Compound verbs with okurigana (e.g. 見+定める -> 見定める, 見+定めた -> 見定めた) are surfaced as candidates
+    const splitVerbTokens = [
+      { surface: '見', baseForm: '見', isWord: true, hasKanji: true, status: 'unknown' as const },
+      { surface: '定める', baseForm: '定める', isWord: true, hasKanji: true, status: 'unknown' as const },
+    ];
+    expect(findCandidateCompounds(splitVerbTokens)).toContain('見定める');
+
+    const verifiedVerb = tokenizeJapanese('相手を見定める。', {}, {}, new Set(['見定める']));
+    expect(verifiedVerb.map((t) => t.surface)).toContain('見定める');
+
+    const verifiedPastVerb = tokenizeJapanese('相手を見定めた。', {}, {}, new Set(['見定める']));
+    expect(verifiedPastVerb.map((t) => t.surface)).toContain('見定めた');
   });
 
   it('recognizes known status across kanji and hiragana equivalents (できる <-> 出来る)', () => {
@@ -110,5 +123,10 @@ describe('tokenizeJapanese', () => {
     const kaseida = tokenizeJapanese('お金を稼いだ。海で泳いで帰った。');
     expect(kaseida.map((t) => t.surface)).toContain('稼いだ');
     expect(kaseida.map((t) => t.surface)).toContain('泳いで');
+
+    const colloquial = tokenizeJapanese('今すぐさらっちまおう！やっちまった。行っちゃおう。');
+    expect(colloquial.map((t) => t.surface)).toContain('さらっちまおう');
+    expect(colloquial.map((t) => t.surface)).toContain('やっちまった');
+    expect(colloquial.map((t) => t.surface)).toContain('行っちゃおう');
   });
 });

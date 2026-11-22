@@ -84,6 +84,27 @@ const RULES: DeconjugationRule[] = [
   { suffix: 'たくない', replacements: ['る'], reason: 'desire negative' },
   { suffix: 'たかった', replacements: ['る'], reason: 'desire past' },
 
+  // Colloquial 〜てしまう / 〜でしまう contractions (〜ちゃう / 〜じゃう / 〜ちまう / 〜じまう)
+  { suffix: 'っちまおう', replacements: ['う', 'つ', 'る'], reason: 'colloquial shimau volitional' },
+  { suffix: 'っちまった', replacements: ['う', 'つ', 'る'], reason: 'colloquial shimau past' },
+  { suffix: 'っちまう', replacements: ['う', 'つ', 'る'], reason: 'colloquial shimau' },
+  { suffix: 'っちまえ', replacements: ['う', 'つ', 'る'], reason: 'colloquial shimau imperative' },
+  { suffix: 'ちまおう', replacements: ['る'], reason: 'ichidan colloquial shimau volitional' },
+  { suffix: 'ちまった', replacements: ['る'], reason: 'ichidan colloquial shimau past' },
+  { suffix: 'ちまう', replacements: ['る'], reason: 'ichidan colloquial shimau' },
+  { suffix: 'んじまおう', replacements: ['ぬ', 'ぶ', 'む'], reason: 'godan colloquial shimau volitional' },
+  { suffix: 'んじまった', replacements: ['ぬ', 'ぶ', 'む'], reason: 'godan colloquial shimau past' },
+  { suffix: 'んじまう', replacements: ['ぬ', 'ぶ', 'む'], reason: 'godan colloquial shimau' },
+  { suffix: 'っちゃおう', replacements: ['う', 'つ', 'る', 'く'], reason: 'colloquial chau volitional' },
+  { suffix: 'っちゃった', replacements: ['う', 'つ', 'る', 'く'], reason: 'colloquial chau past' },
+  { suffix: 'っちゃう', replacements: ['う', 'つ', 'る', 'く'], reason: 'colloquial chau' },
+  { suffix: 'ちゃおう', replacements: ['る'], reason: 'ichidan colloquial chau volitional' },
+  { suffix: 'ちゃった', replacements: ['る'], reason: 'ichidan colloquial chau past' },
+  { suffix: 'ちゃう', replacements: ['る'], reason: 'ichidan colloquial chau' },
+  { suffix: 'んじゃおう', replacements: ['ぬ', 'ぶ', 'む'], reason: 'godan colloquial jau volitional' },
+  { suffix: 'んじゃった', replacements: ['ぬ', 'ぶ', 'む'], reason: 'godan colloquial jau past' },
+  { suffix: 'んじゃう', replacements: ['ぬ', 'ぶ', 'む'], reason: 'godan colloquial jau' },
+
   // Conditional & volitional
   { suffix: 'れば', replacements: ['る'], reason: 'conditional' },
   { suffix: 'たら', replacements: ['る'], reason: 'conditional tara' },
@@ -94,6 +115,19 @@ const RULES: DeconjugationRule[] = [
   { suffix: 'したら', replacements: ['す', 'する'], reason: 'godan/suru conditional shitara' },
   { suffix: 'よう', replacements: ['る'], reason: 'ichidan volitional' },
 ];
+
+// Map godan o-row volitional stem ending kana to dictionary u-row kana (行こう -> 行く, 飲もう -> 飲む)
+const O_ROW_TO_U_ROW: Record<string, string> = {
+  お: 'う',
+  こ: 'く',
+  ご: 'ぐ',
+  そ: 'す',
+  と: 'つ',
+  の: 'ぬ',
+  ぼ: 'ぶ',
+  も: 'む',
+  ろ: 'る',
+};
 
 // Map godan a-row stem ending kana to dictionary u-row kana (for passive -れる, causative -せる, negative -ない)
 const A_ROW_TO_U_ROW: Record<string, string> = {
@@ -204,6 +238,14 @@ function deconjugateStep(word: string): string[] {
       if (A_ROW_TO_U_ROW[lastChar]) {
         next.add(stem.slice(0, -1) + A_ROW_TO_U_ROW[lastChar]);
       }
+    }
+  }
+
+  // Handle godan volitional (o-row + う -> u-row): 行こう -> 行く, 飲もう -> 飲む
+  if (word.length > 2 && word.endsWith('う')) {
+    const prevChar = word.slice(-2, -1);
+    if (O_ROW_TO_U_ROW[prevChar]) {
+      next.add(word.slice(0, -2) + O_ROW_TO_U_ROW[prevChar]);
     }
   }
 

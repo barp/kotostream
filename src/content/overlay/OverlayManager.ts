@@ -682,11 +682,14 @@ export class OverlayManager {
           exactOnly: true,
         }).then((res) => {
           const entry = res?.entry;
-          if (entry && (entry.word === compound || entry.reading === compound)) {
+          if (entry) {
             this.verifiedCompounds.add(compound);
+            this.verifiedCompounds.add(entry.word);
             this.entryCache.set(compound, entry);
+            this.entryCache.set(entry.word, entry);
             if (entry.reading) {
               this.readingCache[compound] = entry.reading;
+              this.readingCache[entry.word] = entry.reading;
             }
             if (
               this.currentSubtitle?.id === renderedSubId &&
