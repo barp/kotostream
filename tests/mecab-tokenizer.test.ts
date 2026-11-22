@@ -19,6 +19,7 @@ describe('MeCab / Kuromoji tokenizer on real anime subtitles (とある暗部の
       { line: 'そういう連中はファンから飽きられたら困る', expectedSurface: '飽きられたら', expectedBase: '飽きる' },
       { line: 'あとは稼いだ金を元手に', expectedSurface: '稼いだ', expectedBase: '稼ぐ' },
       { line: '相手を見定める。', expectedSurface: '見定める', expectedBase: '見定める' },
+      { line: '口座から引き落とせ！', expectedSurface: '引き落とせ', expectedBase: '引き落とす' },
       { line: '食べさせられたくなかったんだ', expectedSurface: '食べさせられたくなかった', expectedBase: '食べる' },
       { line: 'お姉ちゃんに任せておきなさい！', expectedSurface: '任せておきなさい', expectedBase: '任せる' },
       { line: '逃げられると思ってるの？', expectedSurface: '思ってる', expectedBase: '思う' },

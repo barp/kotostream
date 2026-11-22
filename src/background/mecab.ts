@@ -13,9 +13,13 @@ let tokenizerPromise: Promise<KuromojiTokenizer> | null = null;
  */
 export function getMeCabTokenizer(): Promise<KuromojiTokenizer> {
   if (!tokenizerPromise) {
+    // IMPORTANT: Do NOT pass chrome.runtime.getURL('dict') directly because Kuromoji's
+    // DictionaryLoader runs `.replace(/\/{1,}/g, '/')`, which corrupts `chrome-extension://`
+    // into `chrome-extension:/`! A root-relative `/dict` path resolves cleanly via fetch()
+    // against the extension's own chrome-extension://<id> origin.
     const dicPath =
-      typeof chrome !== 'undefined' && chrome.runtime?.getURL
-        ? chrome.runtime.getURL('dict')
+      typeof chrome !== 'undefined' && chrome.runtime?.id
+        ? '/dict'
         : 'node_modules/@sglkc/kuromoji/dict';
 
     tokenizerPromise = new Promise<KuromojiTokenizer>((resolve, reject) => {
