@@ -255,7 +255,7 @@ export const Popup: React.FC = () => {
       });
 
       if (tabId) {
-        // Ensure content script is injected on this tab, then apply the track immediately
+        // Ensure content script is injected on this tab, apply the track, AND start the passive 15s audio ring buffer for Anki mining!
         await chrome.scripting
           .executeScript({ target: { tabId }, files: ['content.js'] })
           .catch(() => {});
@@ -265,22 +265,39 @@ export const Popup: React.FC = () => {
             track: savedTrack,
           } satisfies ExtensionMessage)
           .catch(() => {});
+
+        const bufState = (await chrome.runtime.sendMessage({
+          type: 'START_AUDIO_BUFFER',
+          tabId,
+        } satisfies ExtensionMessage)) as CaptureState;
+        if (bufState?.status) setCaptureState(bufState);
       }
 
       setActiveTrackName(savedTrack.fileName);
-      setSubStatus(`Loaded “${savedTrack.fileName}” (${cues.length} lines) onto video!`);
+      setSubStatus(`Loaded “${savedTrack.fileName}” (${cues.length} lines) + audio buffer active!`);
     } finally {
       setLoadingFileUrl(null);
     }
   };
 
-  const isCapturing =
+  const isCapturingLive =
     captureState.status === 'listening' ||
     captureState.status === 'transcribing' ||
     captureState.status === 'starting';
 
+  const isAudioBufferActive = captureState.status === 'buffering' || isCapturingLive;
+
+  const handleToggleAudioBuffer = async () => {
+    const type = isAudioBufferActive ? 'STOP_CAPTURE' : 'START_AUDIO_BUFFER';
+    const next = (await chrome.runtime.sendMessage({
+      type,
+      tabId,
+    } satisfies ExtensionMessage)) as CaptureState;
+    if (next?.status) setCaptureState(next);
+  };
+
   const handleToggleCapture = async () => {
-    const type = isCapturing ? 'STOP_CAPTURE' : 'START_CAPTURE';
+    const type = isCapturingLive ? 'STOP_CAPTURE' : 'START_CAPTURE';
     const next = (await chrome.runtime.sendMessage({
       type,
       tabId,
@@ -425,31 +442,42 @@ export const Popup: React.FC = () => {
         )}
       </div>
 
-      {/* Live AI Fallback Section */}
+      {/* Sentence Audio Buffer & Live AI Fallback Section */}
       <div className="card">
         <div className="capture-status">
-          <span className={`dot ${captureState.status}`} />
+          <span className={`dot ${captureState.status === 'buffering' ? 'listening' : captureState.status}`} />
           <span>
-            {captureState.status === 'idle' && 'Live AI Subtitles (Fallback): Off'}
+            {captureState.status === 'idle' && 'Sentence Audio Buffer: Off'}
+            {captureState.status === 'buffering' && '🔊 Sentence Audio Buffer: Active (15s local)'}
             {captureState.status === 'starting' && 'Connecting to tab audio…'}
-            {captureState.status === 'listening' && 'Listening to tab audio…'}
+            {captureState.status === 'listening' && 'Live AI Subs + Audio Buffer: Active'}
             {captureState.status === 'transcribing' && 'Generating Japanese subtitles…'}
             {captureState.status === 'error' && 'Capture error'}
           </span>
         </div>
 
-        <button
-          className={`btn ${isCapturing ? 'btn-danger' : ''}`}
-          onClick={handleToggleCapture}
-        >
-          {isCapturing ? 'Stop Live AI Subtitles' : 'Start Live AI Subtitles'}
-        </button>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            className={`btn ${captureState.status === 'buffering' ? 'btn-danger' : 'btn-primary'}`}
+            style={{ fontSize: 12, padding: '7px 8px' }}
+            onClick={handleToggleAudioBuffer}
+          >
+            {captureState.status === 'buffering' ? 'Stop Audio Buffer' : 'Enable Sentence Audio'}
+          </button>
+          <button
+            className={`btn ${isCapturingLive ? 'btn-danger' : ''}`}
+            style={{ fontSize: 12, padding: '7px 8px' }}
+            onClick={handleToggleCapture}
+          >
+            {isCapturingLive ? 'Stop AI Subs' : 'Live AI Subs'}
+          </button>
+        </div>
 
         {captureState.status === 'error' && (
           <div className="error-box">{captureState.message}</div>
         )}
 
-        {lastSubtitle && isCapturing && (
+        {lastSubtitle && isCapturingLive && (
           <div
             style={{
               marginTop: 8,

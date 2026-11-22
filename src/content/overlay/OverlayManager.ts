@@ -469,7 +469,9 @@ export class OverlayManager {
     }
 
     this.statusPillEl.className = 'ks-status-pill';
-    if (state.status === 'listening') {
+    if (state.status === 'buffering') {
+      this.statusPillEl.textContent = '🔊 Audio buffer ready';
+    } else if (state.status === 'listening') {
       this.statusPillEl.textContent = state.lastLatencyMs
         ? `Listening · ${state.lastLatencyMs}ms`
         : 'Listening…';
@@ -922,11 +924,22 @@ export class OverlayManager {
       capturingShot: this.settings.anki.includeScreenshot,
     };
 
-    // Capture clean video screenshot & audio clip first (before opening modal so modal isn't in the frame!)
+    // Calculate exact subtitle duration (for .srt/.ass/Jimaku) to slice cleanly from the 15s audio ring buffer
+    const subStart = this.currentSubtitle?.videoTimeSec;
+    const subEnd = this.currentSubtitle?.endTimeSec;
+    const desiredDurationMs =
+      subStart !== undefined && subEnd !== undefined && subEnd > subStart
+        ? Math.min(12000, Math.max(1800, Math.round((subEnd - subStart) * 1000) + 700))
+        : 4500;
+
+    // Capture clean video screenshot & exact sentence audio clip first (before opening modal!)
     const [shot, audioRes] = await Promise.all([
       this.captureVideoFrame(),
       this.settings.anki.includeAudio
-        ? safeSendMessage<{ audioBase64?: string; mimeType?: string }>({ type: 'REQUEST_RECENT_AUDIO' })
+        ? safeSendMessage<{ audioBase64?: string; mimeType?: string; durationSec?: number }>({
+            type: 'REQUEST_RECENT_AUDIO',
+            durationMs: desiredDurationMs,
+          })
         : Promise.resolve(undefined),
     ]);
 
@@ -1048,10 +1061,10 @@ export class OverlayManager {
             ${
               d.audioBase64
                 ? `<div style="display:flex;align-items:center;justify-content:space-between">
-                    <span class="ks-preview-audio-badge">🔊 Sentence audio captured</span>
+                    <span class="ks-preview-audio-badge">🔊 Sentence audio captured (WAV)</span>
                     <button type="button" class="ks-btn" data-modal-action="play-audio">▶ Play Clip</button>
                    </div>`
-                : `<div style="font-size:11px;color:#94a3b8">Audio clip: Start Live AI Subs to capture sentence audio automatically.</div>`
+                : `<div style="font-size:11px;color:#94a3b8">Audio clip: Open the KotoStream popup and load subtitles (or click “Enable Sentence Audio”) to buffer tab audio for mining.</div>`
             }
           </div>
 

@@ -44,15 +44,29 @@ async function ensureOffscreenDocument(): Promise<void> {
   });
 }
 
-async function startTabCapture(tabId: number): Promise<CaptureState> {
+async function startTabCapture(
+  tabId: number,
+  mode: 'live_stt' | 'buffer_only' = 'live_stt'
+): Promise<CaptureState> {
   const settings = await getSettings();
-  if (!settings.stt.apiKey.trim()) {
+  if (mode === 'live_stt' && !settings.stt.apiKey.trim()) {
     const errState: CaptureState = {
       status: 'error',
       message: 'No OpenRouter API key set. Open Settings to add your OpenRouter key.',
     };
     broadcastCaptureState(errState);
     return errState;
+  }
+
+  // If already capturing on this tab in the requested mode (or higher), keep it running
+  if (
+    activeCaptureTabId === tabId &&
+    mode === 'buffer_only' &&
+    (captureState.status === 'buffering' ||
+      captureState.status === 'listening' ||
+      captureState.status === 'transcribing')
+  ) {
+    return captureState;
   }
 
   // Stop any existing capture first
@@ -101,15 +115,19 @@ async function startTabCapture(tabId: number): Promise<CaptureState> {
       streamId,
       tabId,
       settings: settings.stt,
+      mode,
     } satisfies ExtensionMessage);
 
     if (response?.error) {
       throw new Error(response.error);
     }
 
-    const listeningState: CaptureState = { status: 'listening', tabId, lastActivityAt: Date.now() };
-    broadcastCaptureState(listeningState);
-    return listeningState;
+    const nextState: CaptureState =
+      mode === 'buffer_only'
+        ? { status: 'buffering', tabId }
+        : { status: 'listening', tabId, lastActivityAt: Date.now() };
+    broadcastCaptureState(nextState);
+    return nextState;
   } catch (err) {
     activeCaptureTabId = null;
     const message = err instanceof Error ? err.message : String(err);
@@ -289,7 +307,15 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
         if (!targetTabId) {
           return { status: 'error', message: 'No active tab found to capture.' } satisfies CaptureState;
         }
-        return startTabCapture(targetTabId);
+        return startTabCapture(targetTabId, 'live_stt');
+      }
+
+      case 'START_AUDIO_BUFFER': {
+        const targetTabId = message.tabId ?? sender.tab?.id;
+        if (!targetTabId) {
+          return { status: 'error', message: 'No active tab found to capture.' } satisfies CaptureState;
+        }
+        return startTabCapture(targetTabId, 'buffer_only');
       }
 
       case 'STOP_CAPTURE': {
@@ -346,6 +372,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
         try {
           const res = await chrome.runtime.sendMessage({
             type: 'OFFSCREEN_GET_RECENT_AUDIO',
+            durationMs: message.durationMs,
           } satisfies ExtensionMessage);
           return res ?? { audioBase64: undefined };
         } catch {

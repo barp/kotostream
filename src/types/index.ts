@@ -265,12 +265,14 @@ export interface MinedCard {
 export type CaptureState =
   | { status: 'idle' }
   | { status: 'starting' }
+  | { status: 'buffering'; tabId: number }
   | { status: 'listening'; tabId: number; lastActivityAt?: number; lastLatencyMs?: number }
   | { status: 'transcribing'; tabId: number; lastLatencyMs?: number }
   | { status: 'error'; message: string };
 
 export type ExtensionMessage =
   | { type: 'START_CAPTURE'; tabId?: number }
+  | { type: 'START_AUDIO_BUFFER'; tabId?: number }
   | { type: 'STOP_CAPTURE'; tabId?: number }
   | { type: 'GET_CAPTURE_STATE'; tabId?: number }
   | { type: 'CAPTURE_STATE_CHANGED'; state: CaptureState; tabId?: number }
@@ -278,12 +280,12 @@ export type ExtensionMessage =
   | { type: 'LOOKUP_WORD'; word: string; surface?: string; exactOnly?: boolean }
   | { type: 'TRANSLATE_SENTENCE'; sentence: string; targetWord?: string }
   | { type: 'CAPTURE_SCREENSHOT' }
-  | { type: 'REQUEST_RECENT_AUDIO' }
-  | { type: 'OFFSCREEN_START_AUDIO'; streamId: string; tabId: number; settings: SttSettings }
+  | { type: 'REQUEST_RECENT_AUDIO'; durationMs?: number }
+  | { type: 'OFFSCREEN_START_AUDIO'; streamId: string; tabId: number; settings: SttSettings; mode: 'live_stt' | 'buffer_only' }
   | { type: 'OFFSCREEN_STOP_AUDIO' }
   | { type: 'OFFSCREEN_UPDATE_SETTINGS'; settings: SttSettings }
   | { type: 'OFFSCREEN_AUDIO_CHUNK'; tabId: number; audioBase64: string; mimeType: string; durationMs: number; rms: number; silenceGapMs: number }
-  | { type: 'OFFSCREEN_GET_RECENT_AUDIO' }
+  | { type: 'OFFSCREEN_GET_RECENT_AUDIO'; durationMs?: number }
   | { type: 'ANKI_REQUEST'; action: string; params?: Record<string, unknown>; url?: string }
   | { type: 'JIMAKU_SEARCH'; query: string }
   | { type: 'JIMAKU_LIST_FILES'; entryId: number; episode?: number }

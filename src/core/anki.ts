@@ -277,7 +277,11 @@ export async function exportCardToAnki(card: MinedCard, settings: AnkiSettings):
   }
 
   if (settings.includeAudio && card.audioBase64) {
-    const ext = card.audioMimeType?.includes('ogg') ? 'ogg' : 'webm';
+    const ext = card.audioMimeType?.includes('wav')
+      ? 'wav'
+      : card.audioMimeType?.includes('ogg')
+        ? 'ogg'
+        : 'webm';
     const filename = `kotostream_${safeId}.${ext}`;
     await invokeAnkiConnect('storeMediaFile', { filename, data: card.audioBase64 }, settings.url);
     mediaFilenames.audio = filename;

@@ -1,6 +1,8 @@
 import type { ExtensionMessage, SttSettings } from '../types';
 
 const TARGET_SAMPLE_RATE = 16000;
+const RING_BUFFER_SECONDS = 15;
+const RING_BUFFER_CAPACITY = TARGET_SAMPLE_RATE * RING_BUFFER_SECONDS;
 
 let mediaStream: MediaStream | null = null;
 let audioContext: AudioContext | null = null;
@@ -9,8 +11,15 @@ let muteGain: GainNode | null = null;
 
 let currentTabId: number | null = null;
 let currentSettings: SttSettings | null = null;
+let captureMode: 'live_stt' | 'buffer_only' = 'buffer_only';
 let isCapturing = false;
 
+// 15-second circular 16kHz mono PCM ring buffer for Migaku-style sentence audio mining
+const ringBuffer = new Int16Array(RING_BUFFER_CAPACITY);
+let ringWritePos = 0;
+let ringFilledSamples = 0;
+
+// Live STT chunk state
 let pcmBuffers: Float32Array[] = [];
 let chunkStartedAt = 0;
 let speechDetectedInChunk = false;
@@ -20,8 +29,69 @@ let previousChunkLastSpeechAt = 0;
 let peakRmsInChunk = 0;
 let silenceSince: number | null = null;
 
-// Rolling recent audio clip (WAV) for Anki sentence mining
-let latestAudioClip: { audioBase64: string; mimeType: string; timestamp: number } | null = null;
+function pushToRingBuffer(samples: Int16Array) {
+  for (let i = 0; i < samples.length; i++) {
+    ringBuffer[ringWritePos] = samples[i];
+    ringWritePos = (ringWritePos + 1) % RING_BUFFER_CAPACITY;
+  }
+  ringFilledSamples = Math.min(RING_BUFFER_CAPACITY, ringFilledSamples + samples.length);
+}
+
+/**
+ * Slices the most recent `durationMs` of spoken audio from the 15-second ring buffer,
+ * trimming trailing pause silence (e.g. from auto-pause on hover) and leading silence
+ * so the mined Anki audio clip starts and ends cleanly on the dialogue line.
+ */
+function sliceRecentAudioWav(requestedDurationMs = 4500): {
+  audioBase64?: string;
+  mimeType?: string;
+  durationSec?: number;
+} {
+  if (ringFilledSamples < TARGET_SAMPLE_RATE * 0.3) {
+    return {};
+  }
+
+  // Read up to requestedDurationMs + 2.5s extra lookback in case the video was paused on hover
+  const clampedMs = Math.min(RING_BUFFER_SECONDS * 1000, Math.max(1500, requestedDurationMs));
+  const lookbackSamples = Math.min(
+    ringFilledSamples,
+    Math.floor(((clampedMs + 2500) / 1000) * TARGET_SAMPLE_RATE)
+  );
+
+  const linear = new Int16Array(lookbackSamples);
+  const startIdx = (ringWritePos - lookbackSamples + RING_BUFFER_CAPACITY) % RING_BUFFER_CAPACITY;
+  for (let i = 0; i < lookbackSamples; i++) {
+    linear[i] = ringBuffer[(startIdx + i) % RING_BUFFER_CAPACITY];
+  }
+
+  // Find the end of actual spoken audio (strip trailing silence after auto-pause)
+  const silenceThreshold = 200;
+  let speechEnd = linear.length - 1;
+  while (speechEnd > 0 && Math.abs(linear[speechEnd]) < silenceThreshold) {
+    speechEnd--;
+  }
+
+  if (speechEnd < TARGET_SAMPLE_RATE * 0.25) {
+    return {}; // Ring buffer is all silence
+  }
+
+  const tailPad = Math.floor(TARGET_SAMPLE_RATE * 0.18);
+  const clipEnd = Math.min(linear.length, speechEnd + tailPad);
+  const desiredSamples = Math.floor((clampedMs / 1000) * TARGET_SAMPLE_RATE);
+  const clipStart = Math.max(0, clipEnd - desiredSamples);
+
+  const sliced = trimSilencePcm(linear.subarray(clipStart, clipEnd), 160);
+  if (sliced.length < TARGET_SAMPLE_RATE * 0.25) {
+    return {};
+  }
+
+  const wavBytes = encodeWav(sliced, TARGET_SAMPLE_RATE);
+  return {
+    audioBase64: uint8ToBase64(wavBytes),
+    mimeType: 'audio/wav',
+    durationSec: Math.round((sliced.length / TARGET_SAMPLE_RATE) * 10) / 10,
+  };
+}
 
 function downsampleTo16k(buffers: Float32Array[], inputSampleRate: number): Int16Array {
   const totalLen = buffers.reduce((sum, b) => sum + b.length, 0);
@@ -62,12 +132,8 @@ function downsampleTo16k(buffers: Float32Array[], inputSampleRate: number): Int1
   return out;
 }
 
-/**
- * Trims leading and trailing near-silence from 16kHz PCM (keeping a 120ms safety pad)
- * so uploads are smaller and STT models transcribe noticeably faster.
- */
 function trimSilencePcm(samples: Int16Array, thresholdAmp = 180): Int16Array {
-  const pad = Math.floor(TARGET_SAMPLE_RATE * 0.12);
+  const pad = Math.floor(TARGET_SAMPLE_RATE * 0.14);
   let start = 0;
   let end = samples.length - 1;
 
@@ -132,8 +198,8 @@ function resetChunkState() {
   silenceSince = null;
 }
 
-function flushChunkIfSpeech() {
-  if (!isCapturing || currentTabId === null || !audioContext) return;
+function flushChunkForLiveStt() {
+  if (!isCapturing || captureMode !== 'live_stt' || currentTabId === null || !audioContext) return;
 
   const hadSpeech = speechDetectedInChunk;
   const rms = peakRmsInChunk;
@@ -159,20 +225,13 @@ function flushChunkIfSpeech() {
 
   const wavBytes = encodeWav(pcm16, TARGET_SAMPLE_RATE);
   const audioBase64 = uint8ToBase64(wavBytes);
-  const mimeType = 'audio/wav';
-
-  latestAudioClip = {
-    audioBase64,
-    mimeType,
-    timestamp: Date.now(),
-  };
 
   chrome.runtime
     .sendMessage({
       type: 'OFFSCREEN_AUDIO_CHUNK',
       tabId: currentTabId,
       audioBase64,
-      mimeType,
+      mimeType: 'audio/wav',
       durationMs,
       rms,
       silenceGapMs,
@@ -180,11 +239,17 @@ function flushChunkIfSpeech() {
     .catch(() => {});
 }
 
-async function startCapture(streamId: string, tabId: number, settings: SttSettings) {
+async function startCapture(
+  streamId: string,
+  tabId: number,
+  settings: SttSettings,
+  mode: 'live_stt' | 'buffer_only'
+) {
   stopCapture();
 
   currentTabId = tabId;
   currentSettings = settings;
+  captureMode = mode;
 
   const constraints = {
     audio: {
@@ -205,19 +270,20 @@ async function startCapture(streamId: string, tabId: number, settings: SttSettin
 
   const source = audioContext.createMediaStreamSource(mediaStream);
 
-  // Route captured audio directly back to speakers so the user hears the video normally!
+  // Route captured audio directly back to speakers so the user hears Amazon Prime / video normally!
   source.connect(audioContext.destination);
 
-  // 2048-sample buffer (~42ms at 48kHz) for snappy VAD
   processorNode = audioContext.createScriptProcessor(2048, 2, 1);
   muteGain = audioContext.createGain();
   muteGain.gain.value = 0;
 
   resetChunkState();
+  ringWritePos = 0;
+  ringFilledSamples = 0;
   isCapturing = true;
 
   processorNode.onaudioprocess = (event) => {
-    if (!isCapturing || !currentSettings) return;
+    if (!isCapturing || !currentSettings || !audioContext) return;
 
     const left = event.inputBuffer.getChannelData(0);
     const right = event.inputBuffer.numberOfChannels > 1 ? event.inputBuffer.getChannelData(1) : null;
@@ -229,8 +295,14 @@ async function startCapture(streamId: string, tabId: number, settings: SttSettin
       mono[i] = sample;
       sumSq += sample * sample;
     }
-    const rms = Math.sqrt(sumSq / left.length);
 
+    // Always feed the local 15-second PCM ring buffer for Migaku-style sentence audio mining
+    const frame16k = downsampleTo16k([mono], audioContext.sampleRate);
+    pushToRingBuffer(frame16k);
+
+    if (captureMode !== 'live_stt') return;
+
+    const rms = Math.sqrt(sumSq / left.length);
     pcmBuffers.push(mono);
 
     const now = Date.now();
@@ -259,7 +331,7 @@ async function startCapture(streamId: string, tabId: number, settings: SttSettin
     const shouldSplitOnMaxDuration = elapsed >= currentSettings.chunkDurationMs;
 
     if (shouldSplitOnPause || shouldSplitOnMaxDuration) {
-      flushChunkIfSpeech();
+      flushChunkForLiveStt();
     }
   };
 
@@ -303,6 +375,8 @@ function stopCapture() {
   }
 
   resetChunkState();
+  ringWritePos = 0;
+  ringFilledSamples = 0;
   lastSpeechSeenAt = 0;
   previousChunkLastSpeechAt = 0;
   currentTabId = null;
@@ -310,7 +384,7 @@ function stopCapture() {
 
 chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
   if (message.type === 'OFFSCREEN_START_AUDIO') {
-    startCapture(message.streamId, message.tabId, message.settings)
+    startCapture(message.streamId, message.tabId, message.settings, message.mode)
       .then(() => sendResponse({ ok: true }))
       .catch((err) => sendResponse({ error: err instanceof Error ? err.message : String(err) }));
     return true;
@@ -329,7 +403,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
   }
 
   if (message.type === 'OFFSCREEN_GET_RECENT_AUDIO') {
-    sendResponse(latestAudioClip ?? {});
+    sendResponse(sliceRecentAudioWav(message.durationMs));
     return false;
   }
 
