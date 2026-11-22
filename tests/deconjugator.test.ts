@@ -12,6 +12,8 @@ describe('deconjugate', () => {
     expect(deconjugate('飲みます')).toContain('飲む');
     expect(deconjugate('行かない')).toContain('行く');
     expect(deconjugate('話した')).toContain('話す');
+    expect(deconjugate('稼いだ')).toContain('稼ぐ');
+    expect(deconjugate('泳いで')).toContain('泳ぐ');
   });
 
   it('deconjugates i-adjectives', () => {

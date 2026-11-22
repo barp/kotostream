@@ -174,7 +174,8 @@ export function tokenizeJapanese(
     const isCopulaOnNoun =
       (segItem.text === 'だ' || segItem.text === 'で') &&
       prev &&
-      !prev.text.endsWith('ん');
+      !prev.text.endsWith('ん') &&
+      !prev.text.endsWith('い');
 
     if (
       prev &&

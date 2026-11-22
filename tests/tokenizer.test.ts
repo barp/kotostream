@@ -103,8 +103,12 @@ describe('tokenizeJapanese', () => {
     expect(kanaTokens.find((t) => t.surface === 'かわいい')?.status).toBe('known');
   });
 
-  it('keeps chained verb conjugations like 飽きられたら as a single token', () => {
+  it('keeps chained verb conjugations and godan -gu past/te forms as single tokens', () => {
     const tokens = tokenizeJapanese('すぐに飽きられたら困るよ。');
     expect(tokens.map((t) => t.surface)).toContain('飽きられたら');
+
+    const kaseida = tokenizeJapanese('お金を稼いだ。海で泳いで帰った。');
+    expect(kaseida.map((t) => t.surface)).toContain('稼いだ');
+    expect(kaseida.map((t) => t.surface)).toContain('泳いで');
   });
 });
