@@ -124,3 +124,171 @@ export function uint8ToBase64(bytes: Uint8Array): string {
   }
   return btoa(binary);
 }
+
+interface AudioRingFrame {
+  samples: Int16Array;
+  startSec: number | null;
+  endSec: number | null;
+  segmentId: number;
+}
+
+/**
+ * Timestamped rolling PCM ring buffer (16 kHz mono Int16) for Migaku-style sentence audio extraction.
+ *
+ * Each pushed audio frame carries its exact episode `[startSec, endSec]` so extracting audio for
+ * a subtitle cue `[subStart, subEnd]` slices from the exact start of the sentence—even if the user
+ * paused for 10+ seconds to read a dictionary entry or paused slightly after the line finished.
+ */
+export class TimestampedAudioRing {
+  private frames: AudioRingFrame[] = [];
+  private totalSamples = 0;
+  private maxSamples: number;
+  private currentSegmentId = 0;
+  private lastEndSec: number | null = null;
+
+  constructor(maxDurationSec = 60, sampleRate = TARGET_SAMPLE_RATE) {
+    this.maxSamples = Math.max(sampleRate, Math.floor(maxDurationSec * sampleRate));
+  }
+
+  public clear(): void {
+    this.frames = [];
+    this.totalSamples = 0;
+    this.currentSegmentId = 0;
+    this.lastEndSec = null;
+  }
+
+  public get lengthSamples(): number {
+    return this.totalSamples;
+  }
+
+  public push(samples: Int16Array, startSec: number | null, endSec: number | null): void {
+    if (samples.length === 0) return;
+
+    // Detect seek/discontinuity so re-watched segments never concatenate with earlier passes
+    if (startSec !== null && endSec !== null && this.lastEndSec !== null) {
+      if (startSec < this.lastEndSec - 0.5 || startSec > this.lastEndSec + 1.5) {
+        this.currentSegmentId++;
+      }
+    }
+
+    if (endSec !== null) {
+      this.lastEndSec = endSec;
+    }
+
+    this.frames.push({
+      samples,
+      startSec,
+      endSec,
+      segmentId: this.currentSegmentId,
+    });
+    this.totalSamples += samples.length;
+
+    while (this.totalSamples > this.maxSamples && this.frames.length > 0) {
+      const removed = this.frames.shift()!;
+      this.totalSamples -= removed.samples.length;
+    }
+  }
+
+  /**
+   * Slices audio covering `[startSec - padBeforeSec, endSec + padAfterSec]` from the most recent
+   * playback segment that overlaps that window. Returns `null` if no overlapping timestamped audio
+   * is available in the ring buffer.
+   */
+  public sliceByTimeRange(
+    startSec: number,
+    endSec: number,
+    padBeforeSec = 0.25,
+    padAfterSec = 0.25
+  ): Int16Array | null {
+    if (this.frames.length === 0 || !Number.isFinite(startSec) || !Number.isFinite(endSec)) {
+      return null;
+    }
+
+    const winStart = Math.max(0, startSec - padBeforeSec);
+    const winEnd = Math.max(winStart + 0.5, endSec + padAfterSec);
+
+    // Find the most recent segmentId that overlaps [winStart, winEnd]
+    let targetSegmentId: number | null = null;
+    for (let i = this.frames.length - 1; i >= 0; i--) {
+      const f = this.frames[i];
+      if (f.startSec !== null && f.endSec !== null && f.endSec > winStart && f.startSec < winEnd) {
+        targetSegmentId = f.segmentId;
+        break;
+      }
+    }
+    if (targetSegmentId === null) return null;
+
+    const slices: Int16Array[] = [];
+    let outLen = 0;
+
+    for (const f of this.frames) {
+      if (f.segmentId !== targetSegmentId) continue;
+      if (f.startSec === null || f.endSec === null) continue;
+      if (f.endSec <= winStart || f.startSec >= winEnd) continue;
+
+      const frameDur = f.endSec - f.startSec;
+      if (frameDur <= 0) continue;
+
+      const relStart = Math.max(0, (winStart - f.startSec) / frameDur);
+      const relEnd = Math.min(1, (winEnd - f.startSec) / frameDur);
+      const s0 = Math.max(0, Math.min(f.samples.length, Math.floor(relStart * f.samples.length)));
+      const s1 = Math.max(s0, Math.min(f.samples.length, Math.ceil(relEnd * f.samples.length)));
+      if (s1 > s0) {
+        const sub = f.samples.subarray(s0, s1);
+        slices.push(sub);
+        outLen += sub.length;
+      }
+    }
+
+    if (outLen < TARGET_SAMPLE_RATE * 0.25) return null;
+
+    const merged = new Int16Array(outLen);
+    let offset = 0;
+    for (const sub of slices) {
+      merged.set(sub, offset);
+      offset += sub.length;
+    }
+
+    // Only trim pure digital silence at the outer edges so we never cut off the first syllable
+    return trimSilencePcm(merged, 80);
+  }
+
+  /**
+   * Fallback when subtitle timestamps aren't available: scans across the entire buffered history
+   * to find the end of the last spoken audio and slices `requestedDurationMs` ending there.
+   */
+  public sliceRecent(requestedDurationMs = 4500): Int16Array | null {
+    if (this.totalSamples < TARGET_SAMPLE_RATE * 0.3) {
+      return null;
+    }
+
+    const linear = new Int16Array(this.totalSamples);
+    let offset = 0;
+    for (const f of this.frames) {
+      linear.set(f.samples, offset);
+      offset += f.samples.length;
+    }
+
+    const silenceThreshold = 200;
+    let speechEnd = linear.length - 1;
+    while (speechEnd > 0 && Math.abs(linear[speechEnd]) < silenceThreshold) {
+      speechEnd--;
+    }
+
+    if (speechEnd < TARGET_SAMPLE_RATE * 0.25) {
+      return null;
+    }
+
+    const clampedMs = Math.min(60000, Math.max(1500, requestedDurationMs));
+    const tailPad = Math.floor(TARGET_SAMPLE_RATE * 0.18);
+    const clipEnd = Math.min(linear.length, speechEnd + tailPad);
+    const desiredSamples = Math.floor((clampedMs / 1000) * TARGET_SAMPLE_RATE);
+    const clipStart = Math.max(0, clipEnd - desiredSamples);
+
+    const sliced = trimSilencePcm(linear.subarray(clipStart, clipEnd), 120);
+    if (sliced.length < TARGET_SAMPLE_RATE * 0.25) {
+      return null;
+    }
+    return sliced;
+  }
+}

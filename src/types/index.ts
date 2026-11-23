@@ -295,7 +295,22 @@ export type ExtensionMessage =
   | { type: 'TOKENIZE_TEXT'; text: string }
   | { type: 'TRANSLATE_SENTENCE'; sentence: string; targetWord?: string }
   | { type: 'CAPTURE_SCREENSHOT' }
-  | { type: 'REQUEST_RECENT_AUDIO'; durationMs?: number }
+  | { type: 'REQUEST_RECENT_AUDIO'; durationMs?: number; startTimeSec?: number; endTimeSec?: number }
+  | {
+      type: 'VIDEO_TIME_SYNC';
+      currentTimeSec: number;
+      playing: boolean;
+      playbackRate: number;
+      sentAtMs: number;
+    }
+  | {
+      type: 'OFFSCREEN_VIDEO_SYNC';
+      tabId: number;
+      currentTimeSec: number;
+      playing: boolean;
+      playbackRate: number;
+      sentAtMs: number;
+    }
   | {
       type: 'OFFSCREEN_START_AUDIO';
       streamId: string;
@@ -325,7 +340,7 @@ export type ExtensionMessage =
       chunkIndex: number;
       rms: number;
     }
-  | { type: 'OFFSCREEN_GET_RECENT_AUDIO'; durationMs?: number }
+  | { type: 'OFFSCREEN_GET_RECENT_AUDIO'; durationMs?: number; startTimeSec?: number; endTimeSec?: number }
   | { type: 'PRESCAN_START_VIDEO'; targetRate: number }
   | { type: 'PRESCAN_STOP_VIDEO'; rewindToStart?: boolean }
   | {

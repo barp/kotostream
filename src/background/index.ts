@@ -785,11 +785,30 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
         }
       }
 
+      case 'VIDEO_TIME_SYNC': {
+        const tabId = sender.tab?.id;
+        if (tabId !== undefined && activeCaptureTabId === tabId) {
+          void chrome.runtime
+            .sendMessage({
+              type: 'OFFSCREEN_VIDEO_SYNC',
+              tabId,
+              currentTimeSec: message.currentTimeSec,
+              playing: message.playing,
+              playbackRate: message.playbackRate,
+              sentAtMs: message.sentAtMs,
+            } satisfies ExtensionMessage)
+            .catch(() => {});
+        }
+        return { ok: true };
+      }
+
       case 'REQUEST_RECENT_AUDIO': {
         try {
           const res = await chrome.runtime.sendMessage({
             type: 'OFFSCREEN_GET_RECENT_AUDIO',
             durationMs: message.durationMs,
+            startTimeSec: message.startTimeSec,
+            endTimeSec: message.endTimeSec,
           } satisfies ExtensionMessage);
           return res ?? { audioBase64: undefined };
         } catch {

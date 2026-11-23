@@ -127,6 +127,9 @@ export class OverlayManager {
 
   private activeToken: Token | null = null;
   private activeRowSentence: string | null = null;
+  private activeCuesForCurrentSub: SubtitleLine[] = [];
+  private activeRowRange: { startSec: number; endSec: number } | null = null;
+  private lastVideoSyncSentAt = 0;
   private activeEntry: DictionaryEntry | null = null;
   private pausedByOverlay = false;
   private hoverCloseTimer: number | null = null;
@@ -380,9 +383,21 @@ export class OverlayManager {
     this.video = video;
     this.ensureMounted();
 
-    // Bind video timeupdate for .srt/.vtt/.ass playback sync
+    // Bind video listeners for .srt/.vtt/.ass playback sync & timestamped sentence audio buffer
     video.removeEventListener('timeupdate', this.handleVideoTimeUpdate);
+    video.removeEventListener('play', this.handleVideoStateSync);
+    video.removeEventListener('playing', this.handleVideoStateSync);
+    video.removeEventListener('pause', this.handleVideoStateSync);
+    video.removeEventListener('seeked', this.handleVideoStateSync);
+    video.removeEventListener('ratechange', this.handleVideoStateSync);
+
     video.addEventListener('timeupdate', this.handleVideoTimeUpdate);
+    video.addEventListener('play', this.handleVideoStateSync);
+    video.addEventListener('playing', this.handleVideoStateSync);
+    video.addEventListener('pause', this.handleVideoStateSync);
+    video.addEventListener('seeked', this.handleVideoStateSync);
+    video.addEventListener('ratechange', this.handleVideoStateSync);
+    this.emitVideoTimeSync(true);
 
     // Auto-load any saved subtitle track bound to this episode URL
     if (this.lastAutoLoadedUrl !== window.location.href) {
@@ -410,6 +425,11 @@ export class OverlayManager {
     this.subtitleBoxEl.innerHTML = '';
     if (this.video) {
       this.video.removeEventListener('timeupdate', this.handleVideoTimeUpdate);
+      this.video.removeEventListener('play', this.handleVideoStateSync);
+      this.video.removeEventListener('playing', this.handleVideoStateSync);
+      this.video.removeEventListener('pause', this.handleVideoStateSync);
+      this.video.removeEventListener('seeked', this.handleVideoStateSync);
+      this.video.removeEventListener('ratechange', this.handleVideoStateSync);
     }
     this.host.style.display = 'none';
     if (this.host.isConnected) {
@@ -477,8 +497,34 @@ export class OverlayManager {
     return `${sign}${sec.toFixed(1)}s`;
   }
 
+  private emitVideoTimeSync(force = false) {
+    if (!this.video) return;
+    const isBuffering =
+      this.captureState.status === 'buffering' ||
+      this.captureState.status === 'listening' ||
+      this.captureState.status === 'transcribing';
+    if (!isBuffering) return;
+
+    const now = Date.now();
+    if (!force && now - this.lastVideoSyncSentAt < 350) return;
+    this.lastVideoSyncSentAt = now;
+
+    void safeSendMessage({
+      type: 'VIDEO_TIME_SYNC',
+      currentTimeSec: this.video.currentTime,
+      playing: !this.video.paused && !this.video.ended && this.video.readyState >= 2,
+      playbackRate: this.video.playbackRate || 1,
+      sentAtMs: now,
+    });
+  }
+
+  private handleVideoStateSync = () => {
+    this.emitVideoTimeSync(true);
+  };
+
   private handleVideoTimeUpdate = () => {
     this.syncFileSubtitleToVideo();
+    this.emitVideoTimeSync(false);
   };
 
   private syncFileSubtitleToVideo() {
@@ -492,9 +538,16 @@ export class OverlayManager {
     if (activeCues.length > 0) {
       const combinedId = activeCues.map((c) => c.id).join('+');
       if (combinedId !== this.currentSubtitle?.id) {
+        this.activeCuesForCurrentSub = activeCues;
+        const minStart = Math.min(...activeCues.map((c) => c.videoTimeSec ?? 0));
+        const maxEnd = Math.max(
+          ...activeCues.map((c) => c.endTimeSec ?? (c.videoTimeSec ?? 0) + 4)
+        );
         const combinedLine: SubtitleLine = {
           ...activeCues[0],
           id: combinedId,
+          videoTimeSec: minStart,
+          endTimeSec: maxEnd,
           text: activeCues.map((c) => c.text.replace(/\n/g, ' ')).join('\n'),
         };
         this.setSubtitle(combinedLine, false);
@@ -514,6 +567,8 @@ export class OverlayManager {
     } else if (this.currentSubtitle?.source === 'file') {
       this.currentSubtitle = null;
       this.committedSubtitle = null;
+      this.activeCuesForCurrentSub = [];
+      this.activeRowRange = null;
       this.subtitleBoxEl.classList.add('ks-empty');
       this.subtitleBoxEl.innerHTML = '';
     }
@@ -592,6 +647,14 @@ export class OverlayManager {
       this.showToast(state.message);
     } else {
       this.statusPillEl.textContent = '';
+    }
+
+    if (
+      state.status === 'buffering' ||
+      state.status === 'listening' ||
+      state.status === 'transcribing'
+    ) {
+      this.emitVideoTimeSync(true);
     }
   }
 
@@ -726,17 +789,32 @@ export class OverlayManager {
         }
 
         if (token.isWord) {
+          const captureRowContext = () => {
+            this.activeRowSentence = lineText;
+            const rowCue = this.activeCuesForCurrentSub[rowIdx];
+            if (rowCue && rowCue.videoTimeSec !== undefined) {
+              this.activeRowRange = {
+                startSec: Math.max(0, rowCue.videoTimeSec + this.subtitleOffsetSec),
+                endSec: Math.max(
+                  0,
+                  (rowCue.endTimeSec ?? rowCue.videoTimeSec + 4) + this.subtitleOffsetSec
+                ),
+              };
+            } else {
+              this.activeRowRange = null;
+            }
+          };
           span.addEventListener('mouseenter', () => {
             if (this.hoverCloseTimer) {
               clearTimeout(this.hoverCloseTimer);
               this.hoverCloseTimer = null;
             }
-            this.activeRowSentence = lineText;
+            captureRowContext();
             void this.openPopoverForToken(token, span);
           });
           span.addEventListener('click', (e) => {
             e.stopPropagation();
-            this.activeRowSentence = lineText;
+            captureRowContext();
             void this.openPopoverForToken(token, span);
           });
         }
@@ -992,15 +1070,12 @@ export class OverlayManager {
     const popAudioBtn = this.popoverEl.querySelector<HTMLButtonElement>('[data-pop-audio="play"]');
     popAudioBtn?.addEventListener('click', async (e) => {
       e.stopPropagation();
-      const subStart = this.currentSubtitle?.videoTimeSec;
-      const subEnd = this.currentSubtitle?.endTimeSec;
-      const desiredDurationMs =
-        subStart !== undefined && subEnd !== undefined && subEnd > subStart
-          ? Math.min(12000, Math.max(1800, Math.round((subEnd - subStart) * 1000) + 700))
-          : 4500;
+      const range = this.getActiveAudioRange();
       const audioRes = await safeSendMessage<{ audioBase64?: string; mimeType?: string }>({
         type: 'REQUEST_RECENT_AUDIO',
-        durationMs: desiredDurationMs,
+        durationMs: range.durationMs,
+        startTimeSec: range.startTimeSec,
+        endTimeSec: range.endTimeSec,
       });
       if (audioRes?.audioBase64) {
         await playBase64Audio(audioRes.audioBase64, audioRes.mimeType);
@@ -1060,6 +1135,36 @@ export class OverlayManager {
     return res?.translation?.trim() ?? '';
   }
 
+  private getActiveAudioRange(): {
+    startTimeSec?: number;
+    endTimeSec?: number;
+    durationMs: number;
+  } {
+    if (this.activeRowRange && this.activeRowRange.endSec > this.activeRowRange.startSec) {
+      const { startSec, endSec } = this.activeRowRange;
+      return {
+        startTimeSec: startSec,
+        endTimeSec: endSec,
+        durationMs: Math.min(15000, Math.max(1800, Math.round((endSec - startSec) * 1000) + 700)),
+      };
+    }
+
+    const subStart = this.currentSubtitle?.videoTimeSec;
+    const subEnd = this.currentSubtitle?.endTimeSec;
+    if (subStart !== undefined && subEnd !== undefined && subEnd > subStart) {
+      const offset = this.currentSubtitle?.source === 'file' ? this.subtitleOffsetSec : 0;
+      const startSec = Math.max(0, subStart + offset);
+      const endSec = Math.max(startSec + 0.5, subEnd + offset);
+      return {
+        startTimeSec: startSec,
+        endTimeSec: endSec,
+        durationMs: Math.min(15000, Math.max(1800, Math.round((endSec - startSec) * 1000) + 700)),
+      };
+    }
+
+    return { durationMs: 4500 };
+  }
+
   private async startMineWorkflow(
     surfaceWord: string,
     word: string,
@@ -1097,13 +1202,8 @@ export class OverlayManager {
       capturingShot: this.settings.anki.includeScreenshot,
     };
 
-    // Calculate exact subtitle duration (for .srt/.ass/Jimaku) to slice cleanly from the 15s audio ring buffer
-    const subStart = this.currentSubtitle?.videoTimeSec;
-    const subEnd = this.currentSubtitle?.endTimeSec;
-    const desiredDurationMs =
-      subStart !== undefined && subEnd !== undefined && subEnd > subStart
-        ? Math.min(12000, Math.max(1800, Math.round((subEnd - subStart) * 1000) + 700))
-        : 4500;
+    // Calculate exact episode timestamp window (adjusted by subtitleOffsetSec) for sentence audio extraction
+    const range = this.getActiveAudioRange();
 
     // Capture clean video screenshot & exact sentence audio clip first (before opening modal!)
     const [shot, audioRes] = await Promise.all([
@@ -1111,7 +1211,9 @@ export class OverlayManager {
       this.settings.anki.includeAudio
         ? safeSendMessage<{ audioBase64?: string; mimeType?: string; durationSec?: number }>({
             type: 'REQUEST_RECENT_AUDIO',
-            durationMs: desiredDurationMs,
+            durationMs: range.durationMs,
+            startTimeSec: range.startTimeSec,
+            endTimeSec: range.endTimeSec,
           })
         : Promise.resolve(undefined),
     ]);

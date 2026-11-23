@@ -1,14 +1,15 @@
 import type { ExtensionMessage, SttSettings } from '../types';
 import {
   TARGET_SAMPLE_RATE,
+  TimestampedAudioRing,
   encodeWav,
   resampleTo16k,
   trimSilencePcm,
   uint8ToBase64,
 } from '../core/audio-dsp';
 
-const RING_BUFFER_SECONDS = 15;
-const RING_BUFFER_CAPACITY = TARGET_SAMPLE_RATE * RING_BUFFER_SECONDS;
+const RING_BUFFER_SECONDS = 60;
+const AUDIO_PIPELINE_LATENCY_SEC = 0.08;
 const PRESCAN_CHUNK_EPISODE_SEC = 30;
 const PRESCAN_MIN_RMS = 0.0018;
 
@@ -23,10 +24,15 @@ let currentSettings: SttSettings | null = null;
 let captureMode: 'live_stt' | 'buffer_only' | 'prescan' = 'buffer_only';
 let isCapturing = false;
 
-// 15-second circular 16kHz mono PCM ring buffer for Migaku-style sentence audio mining
-const ringBuffer = new Int16Array(RING_BUFFER_CAPACITY);
-let ringWritePos = 0;
-let ringFilledSamples = 0;
+// 60-second timestamped 16kHz mono PCM ring buffer for exact Migaku-style sentence audio mining
+const audioRing = new TimestampedAudioRing(RING_BUFFER_SECONDS, TARGET_SAMPLE_RATE);
+let videoSyncReceived = false;
+let videoSyncTimeSec = 0;
+let videoSyncWallMs = 0;
+let videoSyncPlaying = false;
+let videoSyncPlaybackRate = 1;
+let videoPausedAtWallMs = 0;
+let consecutiveSilentFrames = 0;
 
 // Live STT chunk state
 let pcmBuffers: Float32Array[] = [];
@@ -48,57 +54,50 @@ let prescanPlaybackRate = 4;
 let prescanPlaying = false;
 let prescanChunkIndex = 0;
 
-function pushToRingBuffer(samples: Int16Array) {
-  for (let i = 0; i < samples.length; i++) {
-    ringBuffer[ringWritePos] = samples[i];
-    ringWritePos = (ringWritePos + 1) % RING_BUFFER_CAPACITY;
-  }
-  ringFilledSamples = Math.min(RING_BUFFER_CAPACITY, ringFilledSamples + samples.length);
+function resetVideoSyncState() {
+  videoSyncReceived = false;
+  videoSyncTimeSec = 0;
+  videoSyncWallMs = 0;
+  videoSyncPlaying = false;
+  videoSyncPlaybackRate = 1;
+  videoPausedAtWallMs = 0;
+  consecutiveSilentFrames = 0;
 }
 
 /**
- * Slices the most recent `durationMs` of spoken audio from the 15-second ring buffer,
- * trimming trailing pause silence (e.g. from auto-pause on hover) and leading silence
- * so the mined Anki audio clip starts and ends cleanly on the dialogue line.
+ * Slices exact sentence audio from the 60-second timestamped ring buffer.
+ * - When `startTimeSec` & `endTimeSec` are provided (e.g. from .srt/.ass/Jimaku/AI pre-scan cues),
+ *   extracts the exact episode window `[startTimeSec - 0.25s, endTimeSec + 0.25s]` so audio always
+ *   starts at the very beginning of the sentence—even if the user paused for 10+ seconds or slightly
+ *   after the line ended.
+ * - Falls back to scanning the full buffer for the most recent `requestedDurationMs` of speech.
  */
-function sliceRecentAudioWav(requestedDurationMs = 4500): {
+function sliceRecentAudioWav(
+  requestedDurationMs = 4500,
+  startTimeSec?: number,
+  endTimeSec?: number
+): {
   audioBase64?: string;
   mimeType?: string;
   durationSec?: number;
 } {
-  if (ringFilledSamples < TARGET_SAMPLE_RATE * 0.3) {
-    return {};
+  let sliced: Int16Array | null = null;
+
+  if (
+    startTimeSec !== undefined &&
+    endTimeSec !== undefined &&
+    Number.isFinite(startTimeSec) &&
+    Number.isFinite(endTimeSec) &&
+    endTimeSec > startTimeSec
+  ) {
+    sliced = audioRing.sliceByTimeRange(startTimeSec, endTimeSec, 0.25, 0.25);
   }
 
-  const clampedMs = Math.min(RING_BUFFER_SECONDS * 1000, Math.max(1500, requestedDurationMs));
-  const lookbackSamples = Math.min(
-    ringFilledSamples,
-    Math.floor(((clampedMs + 2500) / 1000) * TARGET_SAMPLE_RATE)
-  );
-
-  const linear = new Int16Array(lookbackSamples);
-  const startIdx = (ringWritePos - lookbackSamples + RING_BUFFER_CAPACITY) % RING_BUFFER_CAPACITY;
-  for (let i = 0; i < lookbackSamples; i++) {
-    linear[i] = ringBuffer[(startIdx + i) % RING_BUFFER_CAPACITY];
+  if (!sliced) {
+    sliced = audioRing.sliceRecent(requestedDurationMs);
   }
 
-  const silenceThreshold = 200;
-  let speechEnd = linear.length - 1;
-  while (speechEnd > 0 && Math.abs(linear[speechEnd]) < silenceThreshold) {
-    speechEnd--;
-  }
-
-  if (speechEnd < TARGET_SAMPLE_RATE * 0.25) {
-    return {};
-  }
-
-  const tailPad = Math.floor(TARGET_SAMPLE_RATE * 0.18);
-  const clipEnd = Math.min(linear.length, speechEnd + tailPad);
-  const desiredSamples = Math.floor((clampedMs / 1000) * TARGET_SAMPLE_RATE);
-  const clipStart = Math.max(0, clipEnd - desiredSamples);
-
-  const sliced = trimSilencePcm(linear.subarray(clipStart, clipEnd), 160);
-  if (sliced.length < TARGET_SAMPLE_RATE * 0.25) {
+  if (!sliced || sliced.length < TARGET_SAMPLE_RATE * 0.25) {
     return {};
   }
 
@@ -265,8 +264,8 @@ async function startCapture(
 
   resetChunkState();
   resetPrescanState(playbackRate);
-  ringWritePos = 0;
-  ringFilledSamples = 0;
+  resetVideoSyncState();
+  audioRing.clear();
   isCapturing = true;
 
   processorNode.onaudioprocess = (event) => {
@@ -306,9 +305,36 @@ async function startCapture(
       return;
     }
 
-    // Normal mode: always feed the local 15-second PCM ring buffer for Migaku-style sentence audio mining
-    const frame16k = resampleTo16k([mono], audioContext.sampleRate);
-    pushToRingBuffer(frame16k);
+    // Normal mode: feed the 60-second timestamped PCM ring buffer for exact sentence audio mining.
+    // Never overwrite the buffer with dead silence while the video is paused (e.g. while reading a dictionary popup)!
+    const nowMs = Date.now();
+    const isDigitalSilence = rms < 0.0004;
+    if (isDigitalSilence) {
+      consecutiveSilentFrames++;
+    } else {
+      consecutiveSilentFrames = 0;
+    }
+
+    const pausedTailFinished =
+      videoSyncReceived &&
+      !videoSyncPlaying &&
+      (isDigitalSilence || nowMs - videoPausedAtWallMs > 280);
+    const untimestampedLongSilence = !videoSyncReceived && consecutiveSilentFrames > 15;
+
+    if (!pausedTailFinished && !untimestampedLongSilence) {
+      const frame16k = resampleTo16k([mono], audioContext.sampleRate);
+      if (videoSyncReceived) {
+        const elapsedSec = videoSyncPlaying
+          ? Math.max(0, (nowMs - videoSyncWallMs) / 1000) * videoSyncPlaybackRate
+          : Math.min(0.25, Math.max(0, (nowMs - videoSyncWallMs) / 1000)) * videoSyncPlaybackRate;
+        const frameEndSec = Math.max(0, videoSyncTimeSec + elapsedSec - AUDIO_PIPELINE_LATENCY_SEC);
+        const frameDurationSec = (frame16k.length / TARGET_SAMPLE_RATE) * videoSyncPlaybackRate;
+        const frameStartSec = Math.max(0, frameEndSec - frameDurationSec);
+        audioRing.push(frame16k, frameStartSec, frameEndSec);
+      } else {
+        audioRing.push(frame16k, null, null);
+      }
+    }
 
     if (captureMode !== 'live_stt') return;
 
@@ -362,8 +388,8 @@ function setCaptureMode(mode: 'buffer_only' | 'prescan', playbackRate?: number) 
     resetPrescanState(playbackRate ?? 4);
   } else {
     // Clear ring buffer so high-speed audio never leaks into sentence audio mining
-    ringWritePos = 0;
-    ringFilledSamples = 0;
+    audioRing.clear();
+    resetVideoSyncState();
   }
 }
 
@@ -412,8 +438,8 @@ function stopCapture() {
 
   resetChunkState();
   resetPrescanState();
-  ringWritePos = 0;
-  ringFilledSamples = 0;
+  resetVideoSyncState();
+  audioRing.clear();
   lastSpeechSeenAt = 0;
   previousChunkLastSpeechAt = 0;
   currentTabId = null;
@@ -475,8 +501,26 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
     return false;
   }
 
+  if (message.type === 'OFFSCREEN_VIDEO_SYNC') {
+    if (currentTabId === null || message.tabId === currentTabId) {
+      const wasPlaying = videoSyncPlaying;
+      videoSyncReceived = true;
+      videoSyncTimeSec = Math.max(0, message.currentTimeSec);
+      videoSyncWallMs = message.sentAtMs || Date.now();
+      videoSyncPlaying = message.playing;
+      videoSyncPlaybackRate = Math.max(0.25, message.playbackRate || 1);
+      if (wasPlaying && !message.playing) {
+        videoPausedAtWallMs = Date.now();
+      }
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (message.type === 'OFFSCREEN_GET_RECENT_AUDIO') {
-    sendResponse(sliceRecentAudioWav(message.durationMs));
+    sendResponse(
+      sliceRecentAudioWav(message.durationMs, message.startTimeSec, message.endTimeSec)
+    );
     return false;
   }
 
