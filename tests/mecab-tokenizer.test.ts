@@ -103,4 +103,86 @@ describe('MeCab / Kuromoji tokenizer on real anime subtitles (とある暗部の
     expect(hitPast?.baseForm).toBe('気をそらす');
     expect(hitPast?.reading).toBe('きをそらした');
   });
+
+  it('merges chained proverbs like 藪をつついて蛇を出す (incl. conjugated tail) and idioms 目に角を立てる / 蛙の面に水', async () => {
+    // 藪+を+つついて+蛇+を+出す — te-form verb + noun junction inside the chain
+    const m = await analyzeWithMeCab('藪をつついて蛇を出す');
+    const initial = buildTokensFromMorphemes(m);
+    expect(findCandidateCompounds(initial)[0]).toBe('藪をつついて蛇を出す');
+
+    const merged = buildTokensFromMorphemes(m, {}, {}, new Set(['藪をつついて蛇を出す']));
+    const hit = merged.find((t) => t.surface === '藪をつついて蛇を出す');
+    expect(hit).toBeDefined();
+    expect(hit?.baseForm).toBe('藪をつついて蛇を出す');
+    expect(hit?.reading).toBe('やぶをつついてへびをだす');
+    expect(hit?.isWord).toBe(true);
+
+    // Conjugated tail: 藪をつついて蛇を出した -> baseForm 藪をつついて蛇を出す
+    const mPast = await analyzeWithMeCab('藪をつついて蛇を出した');
+    const mergedPast = buildTokensFromMorphemes(mPast, {}, {}, new Set(['藪をつついて蛇を出す']));
+    const hitPast = mergedPast.find((t) => t.surface === '藪をつついて蛇を出した');
+    expect(hitPast).toBeDefined();
+    expect(hitPast?.baseForm).toBe('藪をつついて蛇を出す');
+
+    // 目+に+角+を+立てる — plain 3-word chain idiom
+    const mMoku = await analyzeWithMeCab('目に角を立てる');
+    expect(buildTokensFromMorphemes(mMoku, {}, {}, new Set(['目に角を立てる'])).map((t) => t.surface)).toContain('目に角を立てる');
+
+    // 蛙+の+面+に+水 merges cleanly WITHOUT swallowing the trailing copula だ
+    const mKaeru = await analyzeWithMeCab('蛙の面に水だ');
+    const kaeru = buildTokensFromMorphemes(mKaeru, {}, {}, new Set(['蛙の面に水']));
+    expect(kaeru.map((t) => t.surface)).toContain('蛙の面に水');
+    expect(kaeru.map((t) => t.surface)).not.toContain('蛙の面に水だ');
+  });
+
+  it('recognizes all-kana expressions like きをそらす and never merges unverified chains', async () => {
+    // Kana-written expression (casual subtitle style): き+を+そらす -> きをそらす
+    const mKana = await analyzeWithMeCab('きをそらす');
+    expect(findCandidateCompounds(buildTokensFromMorphemes(mKana))).toContain('きをそらす');
+    const mergedKana = buildTokensFromMorphemes(mKana, {}, {}, new Set(['きをそらす']));
+    expect(mergedKana.map((t) => t.surface)).toContain('きをそらす');
+
+    // An unverified chain (やぶをつついて蛇が出る is NOT in JMdict) stays split
+    const m = await analyzeWithMeCab('やぶをつついて蛇が出るかもよ');
+    const tokens = buildTokensFromMorphemes(m);
+    expect(tokens.map((t) => t.surface)).not.toContain('やぶをつついて蛇が出る');
+    // Its candidate is still surfaced for Jisho verification (which will reject it)
+    expect(findCandidateCompounds(tokens)).toContain('やぶをつついて蛇が出る');
+  });
+
+  it('propagates popover Known/Learning status changes instantly on re-render with cached morphemes', async () => {
+    const m = await analyzeWithMeCab('敵の気をそらすんだ。');
+    const verified = new Set(['気をそらす']);
+
+    // Initially the merged expression is unknown (red underline)
+    const before = buildTokensFromMorphemes(m, {}, {}, verified);
+    expect(before.find((t) => t.surface === '気をそらす')?.status).toBe('unknown');
+
+    // User clicks "Learning" in the popover → setWordStatus updates the vocab map…
+    const vocab: Record<string, VocabEntry> = {
+      気をそらす: {
+        word: '気をそらす',
+        reading: 'きをそらす',
+        meaning: 'to divert (someone) attention',
+        status: 'learning',
+        encounters: 1,
+        firstSeenAt: 1,
+        updatedAt: 2,
+      },
+    };
+
+    // …and a re-render from the SAME cached morphemes must reflect it instantly
+    const afterLearning = buildTokensFromMorphemes(m, vocab, {}, verified);
+    expect(afterLearning.find((t) => t.surface === '気をそらす')?.status).toBe('learning');
+
+    // Marking it Known updates again (underline disappears)
+    vocab['気をそらす'] = { ...vocab['気をそらす'], status: 'known', updatedAt: 3 };
+    const afterKnown = buildTokensFromMorphemes(m, vocab, {}, verified);
+    expect(afterKnown.find((t) => t.surface === '気をそらす')?.status).toBe('known');
+
+    // A conjugated surface of the same expression picks up the status too (readingIndex aliasing)
+    const mPast = await analyzeWithMeCab('一瞬だけ気をそらした。');
+    const pastKnown = buildTokensFromMorphemes(mPast, vocab, {}, verified);
+    expect(pastKnown.find((t) => t.surface === '気をそらした')?.status).toBe('known');
+  });
 });

@@ -74,20 +74,31 @@ export async function getAnkiModelFields(modelName: string, url: string): Promis
   return invokeAnkiConnect<string[]>('modelFieldNames', { modelName }, url);
 }
 
+import { alignFuriganaSegments } from './furigana';
+
 /**
  * Formats a Japanese word with furigana according to Migaku-style settings.
+ * Furigana is aligned per kanji run so it never covers the word's kana parts
+ * (e.g. 食[た]べる, 引[ひ]き落[お]とす) — exactly like Migaku's bracket format.
  */
 export function formatWordWithFurigana(word: string, reading: string, format: FuriganaFormat): string {
   const safeWord = escapeHtml(word);
-  const safeReading = escapeHtml(reading);
 
   if (!reading || reading === word || format === 'none') {
     return safeWord;
   }
+
+  const segments = alignFuriganaSegments(word, reading);
   if (format === 'migaku_brackets') {
-    return `${safeWord}[${safeReading}]`;
+    return segments
+      .map((s) => (s.isKanji ? `${escapeHtml(s.surface)}[${escapeHtml(s.reading)}]` : escapeHtml(s.surface)))
+      .join('');
   }
-  return `<ruby>${safeWord}<rt>${safeReading}</rt></ruby>`;
+  return segments
+    .map((s) =>
+      s.isKanji ? `<ruby>${escapeHtml(s.surface)}<rt>${escapeHtml(s.reading)}</rt></ruby>` : escapeHtml(s.surface)
+    )
+    .join('');
 }
 
 /**

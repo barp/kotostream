@@ -40,22 +40,81 @@ export function isJapaneseWord(text: string): boolean {
 export const EXPRESSION_PARTICLES = new Set(['を', 'が', 'に', 'の', 'へ', 'と', 'で', 'も']);
 
 /**
- * Finds adjacent Japanese word pairs (e.g. 廃+課金 -> 廃課金, 見+定める -> 見定める)
- * AND 3-token idiomatic expressions connected by a particle (e.g. 気+を+そらす -> 気をそらす,
- * 気+を+そらした -> 気をそらす, 手+に+入れる -> 手に入れる, 腹+が+立つ -> 腹が立つ)
+ * Enumerates particle-chained word sequences starting at `start`, longest first:
+ * 3-4 words joined by 2+ expression particles, optionally with directly adjacent words
+ * (e.g. the te-form verb + noun junction in 藪+を+つついて+蛇+を+出す). Only end indexes
+ * are returned — the caller verifies the exact joined surface against JMdict before merging.
+ */
+export function enumerateParticleChains(
+  items: Array<{ surface: string; isWord: boolean }>,
+  start: number,
+  isChainWord: (item: { surface: string; isWord: boolean }) => boolean
+): number[] {
+  if (!items[start] || !isChainWord(items[start])) return [];
+  const ends = new Set<number>();
+
+  const walk = (end: number, words: number, particles: number): void => {
+    if (words >= 3 && particles >= 2) ends.add(end);
+    if (words >= 4) return;
+    // Extend through an expression particle: W + を/が/に/の/へ/と/で/も + W
+    const p = items[end + 1];
+    const wAfterParticle = items[end + 2];
+    if (
+      p?.isWord &&
+      wAfterParticle &&
+      EXPRESSION_PARTICLES.has(p.surface) &&
+      isChainWord(wAfterParticle)
+    ) {
+      walk(end + 2, words + 1, particles + 1);
+    }
+    // Extend to a directly adjacent word (e.g. つついて + 蛇 in 藪をつついて蛇を出す)
+    const wAdjacent = items[end + 1];
+    if (wAdjacent && isChainWord(wAdjacent)) {
+      walk(end + 1, words + 1, particles);
+    }
+  };
+
+  walk(start, 1, 0);
+  return Array.from(ends).sort((a, b) => b - a);
+}
+
+/**
+ * Finds adjacent Japanese word pairs (e.g. 廃+課金 -> 廃課金, 見+定める -> 見定める),
+ * 3-token idiomatic expressions connected by a particle (e.g. 気+を+そらす -> 気をそらす,
+ * 気+を+そらした -> 気をそらす, 手+に+入れる -> 手に入れる, 腹+が+立つ -> 腹が立つ),
+ * AND longer particle-chained idioms/proverbs (e.g. 藪+を+つついて+蛇+を+出す -> 藪をつついて蛇を出す,
+ * 目+に+角+を+立てる -> 目に角を立てる, 蛙+の+面+に+水 -> 蛙の面に水)
  * so the caller can verify them against JMdict/Jisho (`exactOnly: true`).
  */
 export function findCandidateCompounds(tokens: Token[]): string[] {
   const candidates: string[] = [];
   const seen = new Set<string>();
   const addCandidate = (c: string) => {
-    if (c.length >= 2 && c.length <= 10 && !seen.has(c)) {
+    if (c.length >= 2 && c.length <= 12 && !seen.has(c)) {
       seen.add(c);
       candidates.push(c);
     }
   };
+  const isChainWord = (t: { surface: string; isWord: boolean; status?: WordStatus } | undefined): boolean =>
+    !!t && t.isWord && t.status !== 'ignored' && !PARTICLE_SET.has(t.surface);
 
-  // 1. 3-token idiomatic expressions: Word + Particle (を/が/に/の/へ/と/で/も) + Word
+  // 1. Particle-chained idioms & proverbs with 2-3 particle links (checked FIRST so they
+  //    win the prefetch budget): 藪+を+つついて+蛇+を+出す -> 藪をつついて蛇を出す,
+  //    目+に+角+を+立てる -> 目に角を立てる, 蛙+の+面+に+水 -> 蛙の面に水
+  for (let i = 0; i < tokens.length; i++) {
+    const ends = enumerateParticleChains(tokens, i, isChainWord);
+    for (const end of ends) {
+      const surface = tokens.slice(i, end + 1).map((t) => t.surface).join('');
+      addCandidate(surface);
+      const lastToken = tokens[end];
+      if (lastToken.surface !== lastToken.baseForm) {
+        // e.g. 藪をつついて蛇を出した -> candidate 藪をつついて蛇を出す
+        addCandidate(tokens.slice(i, end).map((t) => t.surface).join('') + lastToken.baseForm);
+      }
+    }
+  }
+
+  // 2. 3-token idiomatic expressions: Word + Particle (を/が/に/の/へ/と/で/も) + Word
   for (let i = 0; i < tokens.length - 2; i++) {
     const a = tokens[i];
     const mid = tokens[i + 1];
@@ -64,16 +123,19 @@ export function findCandidateCompounds(tokens: Token[]): string[] {
     if (!EXPRESSION_PARTICLES.has(mid.surface)) continue;
     if (a.status === 'ignored' || PARTICLE_SET.has(a.surface)) continue;
     if (c.status === 'ignored' || PARTICLE_SET.has(c.surface)) continue;
-    if (!a.hasKanji && !c.hasKanji) continue;
 
     // Prefer dictionary form of the trailing verb/adjective (e.g. 気+を+そらした -> 気をそらす)
-    addCandidate(a.surface + mid.surface + c.baseForm);
-    if (c.surface !== c.baseForm) {
-      addCandidate(a.surface + mid.surface + c.surface);
+    const joined = a.surface + mid.surface + c.baseForm;
+    // Kana-written expressions (e.g. きをそらす, やぶをつつく) still count when long enough
+    if (a.hasKanji || c.hasKanji || joined.length >= 5) {
+      addCandidate(joined);
+      if (c.surface !== c.baseForm) {
+        addCandidate(a.surface + mid.surface + c.surface);
+      }
     }
   }
 
-  // 2. 2-token compounds: Word + Word (kanji compounds & compound verbs)
+  // 3. 2-token compounds: Word + Word (kanji compounds & compound verbs)
   for (let i = 0; i < tokens.length - 1; i++) {
     const a = tokens[i];
     const b = tokens[i + 1];
@@ -82,11 +144,13 @@ export function findCandidateCompounds(tokens: Token[]): string[] {
     if (PARTICLE_SET.has(a.surface) || PARTICLE_SET.has(b.surface)) continue;
 
     // Require at least one token to contain kanji so we catch both 廃+課金 and 見+定める / 取り+出す
-    if (!a.hasKanji && !b.hasKanji) continue;
-
-    addCandidate(a.surface + b.baseForm);
-    if (b.surface !== b.baseForm) {
-      addCandidate(a.surface + b.surface);
+    // (all-kana pairs like ぼく+たち are still tried when the result is at least 4 chars)
+    const joined = a.surface + b.baseForm;
+    if (a.hasKanji || b.hasKanji || joined.length >= 4) {
+      addCandidate(joined);
+      if (b.surface !== b.baseForm) {
+        addCandidate(a.surface + b.surface);
+      }
     }
   }
 

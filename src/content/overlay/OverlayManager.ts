@@ -18,6 +18,7 @@ import { buildTokensFromMorphemes, type KuromojiMorpheme } from '../../core/meca
 import { deconjugate } from '../../core/deconjugator';
 import { lookupLocal } from '../../core/dictionary';
 import { parseSubtitleFile, findActiveSubtitlesAtTime, findCueIndexNearTime } from '../../core/subtitle-parser';
+import { alignFuriganaSegments } from '../../core/furigana';
 import { mergeLiveSubtitle } from '../../core/subtitle-merge';
 import {
   addMinedCard,
@@ -133,6 +134,8 @@ export class OverlayManager {
   private browserLinesCache: SubtitleLine[] | null = null;
 
   private activeToken: Token | null = null;
+  /** Cue id of the line the open popover's word belongs to (keeps ks-selected across re-renders) */
+  private activePopoverCueId: string | null = null;
   private activeRowSentence: string | null = null;
   private activeCuesForCurrentSub: SubtitleLine[] = [];
   private activeRowRange: { startSec: number; endSec: number } | null = null;
@@ -756,6 +759,38 @@ export class OverlayManager {
     this.renderCurrentSubtitle();
   }
 
+  /**
+   * Renders a token's visible text with proper per-kanji-run ruby: furigana sits only
+   * above the KANJI segments of the word (食[た]べた), never stretched across its kana
+   * parts. Words that cannot be aligned fall back to one full-width ruby.
+   */
+  private appendTokenText(span: HTMLElement, token: Token, furiganaMode: FuriganaMode) {
+    const showFurigana =
+      token.hasKanji &&
+      token.reading &&
+      (furiganaMode === 'all' ||
+        (furiganaMode === 'unknown_and_learning' &&
+          (token.status === 'unknown' || token.status === 'learning')));
+
+    if (!showFurigana || !token.reading) {
+      span.textContent = token.surface;
+      return;
+    }
+
+    for (const seg of alignFuriganaSegments(token.surface, token.reading)) {
+      if (!seg.isKanji) {
+        span.appendChild(document.createTextNode(seg.surface));
+      } else {
+        const ruby = document.createElement('ruby');
+        ruby.textContent = seg.surface;
+        const rt = document.createElement('rt');
+        rt.textContent = seg.reading;
+        ruby.appendChild(rt);
+        span.appendChild(ruby);
+      }
+    }
+  }
+
   private renderCurrentSubtitle() {
     if (!this.currentSubtitle || !this.currentSubtitle.text.trim()) {
       this.subtitleBoxEl.classList.add('ks-empty');
@@ -809,6 +844,17 @@ export class OverlayManager {
         if (token.isWord) {
           span.classList.add('ks-word');
         }
+        // While the popover is open on a word from THIS cue's row, keep it selected after
+        // status-change re-renders so the user never loses track of the target word.
+        if (
+          this.popoverEl.classList.contains('ks-open') &&
+          this.activeToken &&
+          token.isWord &&
+          token.surface === this.activeToken.surface &&
+          this.activeCuesForCurrentSub[rowIdx]?.id === this.activePopoverCueId
+        ) {
+          span.classList.add('ks-selected');
+        }
         if (
           (token.status === 'unknown' && !this.settings.overlay.highlightUnknown) ||
           (token.status === 'learning' && !this.settings.overlay.highlightLearning)
@@ -816,27 +862,13 @@ export class OverlayManager {
           span.classList.add('ks-no-highlight');
         }
 
-        const showFurigana =
-          token.hasKanji &&
-          token.reading &&
-          (furiganaMode === 'all' ||
-            (furiganaMode === 'unknown_and_learning' && (token.status === 'unknown' || token.status === 'learning')));
-
-        if (showFurigana && token.reading) {
-          const ruby = document.createElement('ruby');
-          ruby.textContent = token.surface;
-          const rt = document.createElement('rt');
-          rt.textContent = token.reading;
-          ruby.appendChild(rt);
-          span.appendChild(ruby);
-        } else {
-          span.textContent = token.surface;
-        }
+        this.appendTokenText(span, token, furiganaMode);
 
         if (token.isWord) {
           const captureRowContext = () => {
             this.activeRowSentence = lineText;
             const rowCue = this.activeCuesForCurrentSub[rowIdx];
+            this.activePopoverCueId = rowCue?.id ?? null;
             if (rowCue && rowCue.videoTimeSec !== undefined) {
               this.activeRowRange = {
                 startSec: Math.max(0, rowCue.videoTimeSec + this.subtitleOffsetSec),
@@ -1126,6 +1158,8 @@ export class OverlayManager {
           this.vocabMap[matchedVocab.baseForm] = aliasUpdated;
         }
         this.renderCurrentSubtitle();
+        // Live-update underlines & furigana in every visible sidebar browser line too!
+        this.refreshBrowserLineStatuses();
         this.renderPopoverContent({ ...token, status }, entry, false);
         this.showToast(`Marked “${word}” as ${status}`);
       });
@@ -1878,6 +1912,8 @@ export class OverlayManager {
       updatedAt: Date.now(),
     };
     this.renderCurrentSubtitle();
+    // The mined word just became Learning — refresh its underline in the panel lines too
+    this.refreshBrowserLineStatuses();
 
     if (this.settings.anki.enabled) {
       try {
@@ -1901,8 +1937,10 @@ export class OverlayManager {
 
   private closePopover() {
     this.popoverEl.classList.remove('ks-open');
-    this.subtitleBoxEl.querySelectorAll('.ks-selected').forEach((el) => el.classList.remove('ks-selected'));
+    // Clear the selection highlight across BOTH the subtitle box and sidebar browser lines
+    this.shadow.querySelectorAll('.ks-selected').forEach((el) => el.classList.remove('ks-selected'));
     this.activeToken = null;
+    this.activePopoverCueId = null;
 
     if (this.pausedByOverlay && this.settings.overlay.autoResumeOnLeave && this.video?.paused) {
       void this.video.play().catch(() => {});
@@ -2080,6 +2118,17 @@ export class OverlayManager {
       if (token.isWord) {
         span.classList.add('ks-word');
       }
+      // While the popover is open on a word from THIS line, keep it selected after
+      // status-change re-renders so the user never loses track of the target word.
+      if (
+        this.popoverEl.classList.contains('ks-open') &&
+        this.activeToken &&
+        token.isWord &&
+        token.surface === this.activeToken.surface &&
+        this.activePopoverCueId === cue.id
+      ) {
+        span.classList.add('ks-selected');
+      }
       if (
         (token.status === 'unknown' && !this.settings.overlay.highlightUnknown) ||
         (token.status === 'learning' && !this.settings.overlay.highlightLearning)
@@ -2087,27 +2136,12 @@ export class OverlayManager {
         span.classList.add('ks-no-highlight');
       }
 
-      const showFurigana =
-        token.hasKanji &&
-        token.reading &&
-        (furiganaMode === 'all' ||
-          (furiganaMode === 'unknown_and_learning' &&
-            (token.status === 'unknown' || token.status === 'learning')));
-
-      if (showFurigana && token.reading) {
-        const ruby = document.createElement('ruby');
-        ruby.textContent = token.surface;
-        const rt = document.createElement('rt');
-        rt.textContent = token.reading;
-        ruby.appendChild(rt);
-        span.appendChild(ruby);
-      } else {
-        span.textContent = token.surface;
-      }
+      this.appendTokenText(span, token, furiganaMode);
 
       if (token.isWord) {
         const captureRowContext = () => {
           this.activeRowSentence = lineText;
+          this.activePopoverCueId = cue.id;
           if (cue.videoTimeSec !== undefined) {
             this.activeRowRange = {
               startSec: Math.max(0, cue.videoTimeSec + this.subtitleOffsetSec),
@@ -2238,6 +2272,50 @@ export class OverlayManager {
       if (!cue || !cue.text.replace(/\n/g, '').includes(compound)) continue;
       const textEl = item.querySelector<HTMLElement>('.ks-history-text');
       if (textEl) {
+        this.renderBrowserLineTokens(cue, textEl);
+      }
+    }
+  }
+
+  /**
+   * Live status refresh: after the user marks a word Known/Learning/Unknown (or mines a
+   * card, which marks it Learning), re-renders ONLY the sidebar browser lines whose
+   * token statuses actually changed — so underlines & furigana update instantly in the
+   * panel, not just in the main subtitle box.
+   */
+  private refreshBrowserLineStatuses() {
+    if (!this.sidebarEl.classList.contains('ks-open') || this.sidebarMode !== 'browser') return;
+    const lines = this.getBrowserLines();
+    if (lines.length === 0) return;
+
+    const items = this.sidebarListEl.querySelectorAll<HTMLElement>('.ks-history-item');
+    for (const item of items) {
+      const cueId = item.dataset.subId;
+      const textEl = item.querySelector<HTMLElement>('.ks-history-text');
+      if (!cueId || !textEl) continue;
+      const cue = lines.find((c) => c.id === cueId);
+      if (!cue) continue;
+
+      const lineText = cue.text.replace(/\n/g, ' ').trim();
+      const morphemes = this.morphemeCache.get(lineText);
+      // Lines still awaiting their MeCab results re-render with fresh statuses via their
+      // pending browserPatch — skip them so the fallback tokenizer never churns them.
+      if (!morphemes) continue;
+
+      const freshTokens = buildTokensFromMorphemes(
+        morphemes,
+        this.vocabMap,
+        this.readingCache,
+        this.verifiedCompounds
+      );
+      const renderedTokens = Array.from(textEl.querySelectorAll<HTMLElement>('.ks-token'));
+      const changed =
+        renderedTokens.length !== freshTokens.length ||
+        freshTokens.some((t, i) => {
+          const m = renderedTokens[i].className.match(/ks-status-([a-z_]+)/);
+          return !m || m[1] !== t.status;
+        });
+      if (changed) {
         this.renderBrowserLineTokens(cue, textEl);
       }
     }

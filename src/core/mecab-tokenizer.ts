@@ -1,7 +1,7 @@
 import type { Token, VocabEntry, WordStatus } from '../types';
 import { deconjugate } from './deconjugator';
 import { hasLocalExact, lookupLocal, PARTICLE_SET } from './dictionary';
-import { containsKanji, EXPRESSION_PARTICLES, findVocabEntry, isJapaneseWord } from './tokenizer';
+import { containsKanji, enumerateParticleChains, EXPRESSION_PARTICLES, findVocabEntry, isJapaneseWord } from './tokenizer';
 
 export interface KuromojiMorpheme {
   surface_form: string;
@@ -66,6 +66,53 @@ export function buildTokensFromMorphemes(
       }
     }
     return false;
+  };
+
+  /**
+   * Longest-first particle chains (3-4 words, 2+ particle links): full JMdict
+   * proverbs/idioms such as 藪+を+つついて+蛇+を+出す -> 藪をつついて蛇を出す,
+   * 目+に+角+を+立てる -> 目に角を立てる, 蛙+の+面+に+水 -> 蛙の面に水.
+   * Only merges when the exact expression is verified.
+   */
+  const tryChainMerge = (
+    start: number
+  ): {
+    end: number;
+    surface: string;
+    baseForm: string;
+    reading: string;
+    pos: string;
+    posDetail1: string;
+  } | null => {
+    const first = units[start];
+    if (!first?.isWord || PARTICLE_SET.has(first.surface)) return null;
+
+    const isUnitChainWord = (u: { surface: string; isWord: boolean }): boolean =>
+      u.isWord && !PARTICLE_SET.has(u.surface);
+
+    for (const end of enumerateParticleChains(units, start, isUnitChainWord)) {
+      const parts = units.slice(start, end + 1);
+      const surface = parts.map((u) => u.surface).join('');
+      if (surface.length < 4 || surface.length > 12) continue;
+      const lastUnit = units[end];
+      const withLastBase = units.slice(start, end).map((u) => u.surface).join('') + lastUnit.baseForm;
+      const matchedBase = isVerifiedCompound(withLastBase);
+      const matchedSurface = matchedBase || isVerifiedCompound(surface);
+      if (!matchedSurface) continue;
+      const resolvedBase = matchedBase ? withLastBase : surface;
+      return {
+        end,
+        surface,
+        baseForm: resolvedBase,
+        reading:
+          readingCache[surface] ||
+          (surface === resolvedBase ? readingCache[resolvedBase] : undefined) ||
+          parts.map((u) => u.reading).join(''),
+        pos: lastUnit.pos,
+        posDetail1: lastUnit.posDetail1,
+      };
+    }
+    return null;
   };
 
   interface MergedUnit {
@@ -209,6 +256,8 @@ export function buildTokensFromMorphemes(
   }
 
   // Pass 2: Dictionary-verified expression & compound merging
+  // - Particle-chained idioms/proverbs, longest first (藪+を+つついて+蛇+を+出す -> 藪をつついて蛇を出す,
+  //   蛙+の+面+に+水, 目+に+角+を+立てる)
   // - 3-unit idiomatic expressions (e.g. 気 + を + そらす -> 気をそらす, 気 + を + そらした -> surface 気をそらした / baseForm 気をそらす)
   // - 2-unit compounds (e.g. 廃 + 課金 -> 廃課金, 依頼 + 人 -> 依頼人, 見 + 定めた -> baseForm 見定める)
   const finalUnits: MergedUnit[] = [];
@@ -216,6 +265,21 @@ export function buildTokensFromMorphemes(
     const cur = units[i];
     const mid = units[i + 1];
     const third = units[i + 2];
+
+    // 0. Longest-first particle chains (2-3 links) verified against JMdict
+    const chain = tryChainMerge(i);
+    if (chain) {
+      finalUnits.push({
+        surface: chain.surface,
+        baseForm: chain.baseForm,
+        reading: chain.reading,
+        pos: chain.pos,
+        posDetail1: chain.posDetail1,
+        isWord: true,
+      });
+      i = chain.end;
+      continue;
+    }
 
     if (
       cur.isWord &&

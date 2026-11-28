@@ -75,6 +75,37 @@ describe('tokenizeJapanese', () => {
     expect(verifiedPastVerb.map((t) => t.surface)).toContain('見定めた');
   });
 
+  it('surfaces chained proverbs (藪をつついて蛇を出す) and all-kana expressions as candidates', () => {
+    // Particle-chained proverb: W を V-te W を V — the full 11-char expression is the TOP candidate
+    const proverbTokens = [
+      { surface: '藪', baseForm: '藪', isWord: true, hasKanji: true, status: 'unknown' as const },
+      { surface: 'を', baseForm: 'を', isWord: true, hasKanji: false, status: 'ignored' as const },
+      { surface: 'つついて', baseForm: 'つつく', isWord: true, hasKanji: false, status: 'unknown' as const },
+      { surface: '蛇', baseForm: '蛇', isWord: true, hasKanji: true, status: 'unknown' as const },
+      { surface: 'を', baseForm: 'を', isWord: true, hasKanji: false, status: 'ignored' as const },
+      { surface: '出す', baseForm: '出す', isWord: true, hasKanji: true, status: 'unknown' as const },
+    ];
+    const proverbCandidates = findCandidateCompounds(proverbTokens);
+    expect(proverbCandidates[0]).toBe('藪をつついて蛇を出す');
+    expect(proverbCandidates).toContain('藪をつついて蛇を出す');
+
+    // Conjugated tail: 藪をつついて蛇を出した -> candidate 藪をつついて蛇を出す
+    expect(
+      findCandidateCompounds([
+        ...proverbTokens.slice(0, 5),
+        { surface: '出した', baseForm: '出す', isWord: true, hasKanji: true, status: 'unknown' as const },
+      ])
+    ).toContain('藪をつついて蛇を出す');
+
+    // All-kana expressions (e.g. きをそらす written without kanji) are candidates too
+    const kanaTokens = [
+      { surface: 'き', baseForm: 'くる', isWord: true, hasKanji: false, status: 'unknown' as const },
+      { surface: 'を', baseForm: 'を', isWord: true, hasKanji: false, status: 'ignored' as const },
+      { surface: 'そらす', baseForm: 'そらす', isWord: true, hasKanji: false, status: 'unknown' as const },
+    ];
+    expect(findCandidateCompounds(kanaTokens)).toContain('きをそらす');
+  });
+
   it('recognizes known status across kanji and hiragana equivalents (できる <-> 出来る)', () => {
     const knownKana: Record<string, VocabEntry> = {
       できる: {

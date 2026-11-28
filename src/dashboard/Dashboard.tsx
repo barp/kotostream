@@ -45,6 +45,7 @@ import {
 } from '../core/anki';
 import { tokenizeJapanese } from '../core/tokenizer';
 import { lookupLocal } from '../core/dictionary';
+import { alignFuriganaSegments } from '../core/furigana';
 
 type DashboardTab = 'review' | 'vocab' | 'subtitles' | 'settings' | 'playground';
 
@@ -1819,14 +1820,18 @@ export const Dashboard: React.FC = () => {
                 className={`pg-token status-${t.status}`}
                 onClick={() => void handlePgTokenClick(t)}
               >
-                {t.hasKanji && t.reading ? (
-                  <ruby>
-                    {t.surface}
-                    <rt>{t.reading}</rt>
-                  </ruby>
-                ) : (
-                  t.surface
-                )}
+                {t.hasKanji && t.reading
+                  ? alignFuriganaSegments(t.surface, t.reading).map((seg, i) =>
+                      seg.isKanji ? (
+                        <ruby key={i}>
+                          {seg.surface}
+                          <rt>{seg.reading}</rt>
+                        </ruby>
+                      ) : (
+                        seg.surface
+                      )
+                    )
+                  : t.surface}
               </span>
             ))}
           </div>

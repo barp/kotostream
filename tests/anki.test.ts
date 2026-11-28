@@ -32,6 +32,13 @@ describe('Migaku-style anki helpers', () => {
     expect(formatWordWithFurigana('約束', 'やくそく', 'none')).toBe('約束');
   });
 
+  it('aligns furigana to only the kanji runs in mixed words (Migaku-style)', () => {
+    // The reading covers 食 only — the okurigana べた stays plain, like Migaku's 食[た]べた
+    expect(formatWordWithFurigana('食べた', 'たべた', 'ruby_html')).toBe('<ruby>食<rt>た</rt></ruby>べた');
+    expect(formatWordWithFurigana('食べた', 'たべた', 'migaku_brackets')).toBe('食[た]べた');
+    expect(formatWordWithFurigana('引き落とす', 'ひきおとす', 'migaku_brackets')).toBe('引[ひ]き落[お]とす');
+  });
+
   it('highlights target word (or conjugated surface form) in sentence', () => {
     expect(formatSentenceHtml('昨日映画を見ていた。', '見る', '見ていた', true)).toBe(
       '昨日映画を<b class="ks-target-word">見ていた</b>。'
