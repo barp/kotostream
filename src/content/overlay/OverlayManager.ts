@@ -17,7 +17,7 @@ import { findCandidateCompounds, findVocabEntry, tokenizeJapanese } from '../../
 import { buildTokensFromMorphemes, type KuromojiMorpheme } from '../../core/mecab-tokenizer';
 import { deconjugate } from '../../core/deconjugator';
 import { lookupLocal } from '../../core/dictionary';
-import { parseSubtitleFile, findActiveSubtitlesAtTime } from '../../core/subtitle-parser';
+import { parseSubtitleFile, findActiveSubtitlesAtTime, findCueIndexNearTime } from '../../core/subtitle-parser';
 import { mergeLiveSubtitle } from '../../core/subtitle-merge';
 import {
   addMinedCard,
@@ -52,6 +52,9 @@ interface CardDraft {
   translating: boolean;
   capturingShot: boolean;
 }
+
+/** How many transcript lines to render above/below the active line in the sidebar browser. */
+const BROWSER_WINDOW_LINES = 80;
 
 function safeSendMessage<T = unknown>(message: ExtensionMessage): Promise<T | undefined> {
   if (typeof chrome === 'undefined' || !chrome.runtime?.id) {
@@ -123,7 +126,11 @@ export class OverlayManager {
   private activeTrackName: string | null = null;
   private subtitleOffsetSec = 0;
   private lastAutoLoadedUrl = '';
-  private sidebarMode: 'history' | 'library' = 'history';
+  private sidebarMode: 'browser' | 'library' = 'browser';
+  private browserActiveIds: Set<string> = new Set();
+  private browserWindowRange: { start: number; end: number } | null = null;
+  private browserFollowLive = true;
+  private browserLinesCache: SubtitleLine[] | null = null;
 
   private activeToken: Token | null = null;
   private activeRowSentence: string | null = null;
@@ -184,7 +191,7 @@ export class OverlayManager {
         <button class="ks-btn" data-action="sync-reset" title="Click to reset sync offset to 0s">0.0s</button>
         <button class="ks-btn" data-action="sync-plus" title="Delay subtitles by 0.5s">+0.5s</button>
       </span>
-      <button class="ks-btn" data-action="toggle-sidebar" title="Transcript history">History</button>
+      <button class="ks-btn" data-action="toggle-sidebar" title="Subtitle browser — browse past &amp; upcoming lines">Subtitles</button>
       <button class="ks-btn" data-action="open-settings" title="Settings &amp; Dashboard">⚙</button>
       <span class="ks-status-pill"></span>
     `;
@@ -216,15 +223,19 @@ export class OverlayManager {
     this.popoverEl.className = 'ks-popover';
     this.shadow.appendChild(this.popoverEl);
 
-    // Sidebar
+    // Sidebar — Migaku-style full transcript browser (past + upcoming lines) & Library
     this.sidebarEl = document.createElement('div');
     this.sidebarEl.className = 'ks-sidebar';
     this.sidebarEl.innerHTML = `
       <div class="ks-sidebar-header">
-        <span>Transcript History</span>
-        <button class="ks-btn" data-action="close-sidebar">✕</button>
+        <span>Subtitles</span>
+        <div class="ks-sidebar-header-actions">
+          <button class="ks-btn ks-btn-icon" data-action="follow-live" title="Jump back to the current line">⤓</button>
+          <button class="ks-btn ks-btn-icon" data-action="close-sidebar">✕</button>
+        </div>
       </div>
       <div class="ks-sidebar-list"></div>
+      <button class="ks-follow-btn" data-action="follow-live">↓ Follow live</button>
     `;
     this.sidebarListEl = this.sidebarEl.querySelector('.ks-sidebar-list')!;
     this.shadow.appendChild(this.sidebarEl);
@@ -266,12 +277,12 @@ export class OverlayManager {
           }
           break;
         case 'toggle-sidebar':
-          if (this.sidebarEl.classList.contains('ks-open') && this.sidebarMode === 'history') {
+          if (this.sidebarEl.classList.contains('ks-open') && this.sidebarMode === 'browser') {
             this.sidebarEl.classList.remove('ks-open');
           } else {
-            this.sidebarMode = 'history';
+            this.sidebarMode = 'browser';
             this.sidebarEl.classList.add('ks-open');
-            this.renderSidebar();
+            this.renderSubtitleBrowser();
           }
           break;
         case 'sync-minus':
@@ -298,6 +309,10 @@ export class OverlayManager {
         this.sidebarEl.classList.remove('ks-open');
         return;
       }
+      if (target.closest('[data-action="follow-live"]')) {
+        this.setBrowserFollow(true);
+        return;
+      }
       if (target.closest('[data-action="open-subtitles-dashboard"]')) {
         void safeSendMessage({ type: 'OPEN_DASHBOARD', tab: 'subtitles' });
         return;
@@ -309,15 +324,26 @@ export class OverlayManager {
       }
       const item = target.closest<HTMLElement>('.ks-history-item');
       if (item?.dataset.subId) {
-        const sub = this.subtitleHistory.find((s) => s.id === item.dataset.subId);
-        if (sub) {
-          this.setSubtitle(sub, false);
-          if (sub.videoTimeSec !== undefined && this.video) {
-            this.video.currentTime = Math.max(0, sub.videoTimeSec + this.subtitleOffsetSec);
+        const cue = this.getBrowserLines().find((s) => s.id === item.dataset.subId);
+        if (cue) {
+          // Seek the video to this line (Migaku-style transcript navigation)
+          if (cue.videoTimeSec !== undefined && this.video) {
+            this.browserActiveIds = new Set([cue.id]);
+            this.browserFollowLive = true;
+            this.video.currentTime = Math.max(0, cue.videoTimeSec + this.subtitleOffsetSec);
+          }
+          if (this.sidebarMode === 'browser') {
+            this.updateBrowserActive();
           }
         }
       }
     });
+
+    // Manual scrolling pauses live-follow so the user can freely browse past & upcoming lines
+    const userScrollHandler = () => this.setBrowserFollow(false);
+    this.sidebarListEl.addEventListener('wheel', userScrollHandler, { passive: true });
+    this.sidebarListEl.addEventListener('touchmove', userScrollHandler, { passive: true });
+    this.sidebarListEl.addEventListener('mousedown', userScrollHandler);
 
     this.fileInputEl.addEventListener('change', async () => {
       const file = this.fileInputEl.files?.[0];
@@ -461,11 +487,14 @@ export class OverlayManager {
     this.subtitleOffsetSec = track.offsetSec || 0;
     this.loadedFileSubtitles = track.cues;
     this.subtitleHistory = [...track.cues];
+    this.browserActiveIds = new Set();
+    this.browserLinesCache = null;
+    this.browserWindowRange = null;
     this.syncGroupEl.style.display = 'inline-flex';
     this.updateSyncLabel();
     this.syncFileSubtitleToVideo();
-    if (this.sidebarEl.classList.contains('ks-open') && this.sidebarMode === 'history') {
-      this.renderSidebar();
+    if (this.sidebarEl.classList.contains('ks-open') && this.sidebarMode === 'browser') {
+      this.renderSubtitleBrowser();
     }
   }
 
@@ -559,6 +588,12 @@ export class OverlayManager {
           text: activeCues.map((c) => c.text.replace(/\n/g, ' ')).join('\n'),
         };
         this.setSubtitle(combinedLine, false);
+
+        // Update the Migaku-style subtitle browser's active highlight + auto-follow
+        this.browserActiveIds = new Set(activeCues.map((c) => c.id));
+        if (this.sidebarEl.classList.contains('ks-open') && this.sidebarMode === 'browser') {
+          this.updateBrowserActive();
+        }
 
         // Pre-tokenize the next 3 upcoming cues in the background via MeCab so they appear in 0ms!
         const lastActive = activeCues[activeCues.length - 1];
@@ -699,8 +734,9 @@ export class OverlayManager {
         }
       }
 
-      if (this.sidebarEl.classList.contains('ks-open')) {
-        this.renderSidebar();
+      this.browserLinesCache = null;
+      if (this.sidebarEl.classList.contains('ks-open') && this.sidebarMode === 'browser') {
+        this.updateLiveBrowser();
       }
     } else {
       this.committedSubtitle = withTime;
@@ -710,8 +746,9 @@ export class OverlayManager {
         if (this.subtitleHistory.length > 300) {
           this.subtitleHistory.pop();
         }
-        if (this.sidebarEl.classList.contains('ks-open')) {
-          this.renderSidebar();
+        this.browserLinesCache = null;
+        if (this.sidebarEl.classList.contains('ks-open') && this.sidebarMode === 'browser') {
+          this.updateLiveBrowser();
         }
       }
     }
@@ -837,7 +874,11 @@ export class OverlayManager {
     this.prefetchSubtitleWords(allTokens);
   }
 
-  private requestMeCabTokenization(lineText: string, renderedSubId?: string) {
+  private requestMeCabTokenization(
+    lineText: string,
+    renderedSubId?: string,
+    browserPatch?: { cueId: string; container: HTMLElement }
+  ) {
     if (!lineText.trim() || this.morphemeCache.has(lineText) || this.pendingMorphemeRequests.has(lineText)) {
       return;
     }
@@ -859,6 +900,13 @@ export class OverlayManager {
           !this.popoverEl.classList.contains('ks-open')
         ) {
           this.renderCurrentSubtitle();
+        }
+        // Patch the sidebar browser line in place so its tokens upgrade instantly
+        if (browserPatch && browserPatch.container.isConnected) {
+          const cue = this.getBrowserLines().find((c) => c.id === browserPatch.cueId);
+          if (cue) {
+            this.renderBrowserLineTokens(cue, browserPatch.container);
+          }
         }
       }
     });
@@ -898,6 +946,10 @@ export class OverlayManager {
             ) {
               this.renderCurrentSubtitle();
             }
+            // Merge the expression inside the sidebar browser lines too (e.g. 気をそらす)
+            if (this.sidebarEl.classList.contains('ks-open') && this.sidebarMode === 'browser') {
+              this.patchBrowserLines(compound);
+            }
           }
         });
       }
@@ -927,7 +979,7 @@ export class OverlayManager {
     }
   }
 
-  private positionPopoverAboveSubtitles(anchorEl: HTMLElement) {
+  private positionPopoverAboveSubtitles(anchorEl: HTMLElement, fromPanel = false) {
     const tokenRect = anchorEl.getBoundingClientRect();
     const subRect = this.subtitleBoxEl.getBoundingClientRect();
     const popWidth = 340;
@@ -938,7 +990,8 @@ export class OverlayManager {
 
     // Anchor the popover's BOTTOM edge cleanly above the entire subtitle box so growing height
     // expands upward and NEVER covers the subtitles!
-    const anchorTop = Math.min(tokenRect.top, subRect.top);
+    // For sidebar browser words, anchor above the token itself so the panel stays readable.
+    const anchorTop = fromPanel ? tokenRect.top : Math.min(tokenRect.top, subRect.top);
     const bottomPx = Math.max(12, window.innerHeight - anchorTop + 12);
     const maxHeightPx = Math.max(180, anchorTop - 24);
 
@@ -949,7 +1002,7 @@ export class OverlayManager {
     this.popoverEl.style.overflowY = 'auto';
   }
 
-  private async openPopoverForToken(token: Token, anchorEl: HTMLElement) {
+  private async openPopoverForToken(token: Token, anchorEl: HTMLElement, fromPanel = false) {
     this.activeToken = token;
 
     if (this.settings.overlay.autoPauseOnHover && this.video && !this.video.paused) {
@@ -957,11 +1010,11 @@ export class OverlayManager {
       this.pausedByOverlay = true;
     }
 
-    // Highlight selected token
-    this.subtitleBoxEl.querySelectorAll('.ks-selected').forEach((el) => el.classList.remove('ks-selected'));
+    // Highlight selected token (across the subtitle box AND the sidebar browser)
+    this.shadow.querySelectorAll('.ks-selected').forEach((el) => el.classList.remove('ks-selected'));
     anchorEl.classList.add('ks-selected');
 
-    this.positionPopoverAboveSubtitles(anchorEl);
+    this.positionPopoverAboveSubtitles(anchorEl, fromPanel);
     this.popoverEl.classList.add('ks-open');
 
     // 1. Instant 0ms check: in-memory prefetched cache or local core dictionary
@@ -1886,30 +1939,308 @@ export class OverlayManager {
       mode === 'all' ? '振り仮名: All' : mode === 'off' ? '振り仮名: Off' : '振り仮名: Smart';
   }
 
-  private renderSidebar() {
-    const titleEl = this.sidebarEl.querySelector('.ks-sidebar-header span');
-    if (titleEl) titleEl.textContent = 'Transcript History';
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Migaku-style Subtitle Browser: full episode transcript (past + upcoming lines),
+  // current line highlighted with live auto-follow, click a line to seek, and every
+  // word stays hoverable/clickable for dictionary lookups & card mining!
+  // ─────────────────────────────────────────────────────────────────────────────
 
-    if (this.subtitleHistory.length === 0) {
+  private getBrowserLines(): SubtitleLine[] {
+    if (this.browserLinesCache) return this.browserLinesCache;
+    this.browserLinesCache =
+      this.loadedFileSubtitles.length > 0
+        ? this.loadedFileSubtitles
+        : [...this.subtitleHistory].reverse(); // live STT → chronological order
+    return this.browserLinesCache;
+  }
+
+  private getBrowserActiveIdx(lines: SubtitleLine[]): number {
+    if (this.loadedFileSubtitles.length === 0) {
+      return Math.max(0, lines.length - 1); // live: newest line at the bottom
+    }
+    if (this.browserActiveIds.size > 0) {
+      const idx = lines.findIndex((c) => this.browserActiveIds.has(c.id));
+      if (idx >= 0) return idx;
+    }
+    // No active cue (e.g. panel opened during a gap): anchor near current playback time
+    if (this.video && lines.length > 0 && lines[0].videoTimeSec !== undefined) {
+      const t = this.video.currentTime - this.subtitleOffsetSec;
+      return findCueIndexNearTime(lines, t);
+    }
+    return 0;
+  }
+
+  private renderSubtitleBrowser() {
+    const titleEl = this.sidebarEl.querySelector('.ks-sidebar-header span');
+    const lines = this.getBrowserLines();
+
+    if (lines.length === 0) {
+      if (titleEl) titleEl.textContent = 'Subtitles';
       this.sidebarListEl.innerHTML = `<div style="color:#94a3b8;font-size:12px;padding:12px;text-align:center">No subtitles yet. Load an .srt/.ass file, pick from Library, or start AI Subs.</div>`;
+      this.browserWindowRange = null;
       return;
     }
 
-    this.sidebarListEl.innerHTML = this.subtitleHistory
-      .slice(0, 120)
-      .map((line) => {
-        const timeStr =
-          line.videoTimeSec !== undefined
-            ? formatSeconds(line.videoTimeSec)
-            : new Date(line.timestampMs).toLocaleTimeString();
-        const badge = line.latencyMs ? `${line.latencyMs}ms` : line.source;
-        return `
-          <div class="ks-history-item" data-sub-id="${escapeHtml(line.id)}">
-            <div class="ks-history-meta"><span>${escapeHtml(timeStr)}</span><span>${escapeHtml(badge)}</span></div>
-            <div class="ks-history-text">${escapeHtml(line.text)}</div>
-          </div>`;
-      })
-      .join('');
+    const isLive = this.loadedFileSubtitles.length === 0;
+    if (titleEl) {
+      const label = isLive
+        ? 'Subtitles · Live AI'
+        : this.activeTrackName
+          ? `Subtitles · ${this.activeTrackName}`
+          : 'Subtitles';
+      titleEl.textContent = `${label} (${lines.length} lines)`;
+    }
+
+    // Windowed render: ±BROWSER_WINDOW lines around the active line keeps the DOM light
+    // even for 2,000-cue episodes, while still showing everything around the playhead.
+    const activeIdx = this.getBrowserActiveIdx(lines);
+    const start = Math.max(0, activeIdx - BROWSER_WINDOW_LINES);
+    const end = Math.min(lines.length, activeIdx + BROWSER_WINDOW_LINES + 1);
+    const visible = lines.slice(start, end);
+    this.browserWindowRange = { start, end };
+
+    const frag = document.createDocumentFragment();
+    const allTokens: Token[] = [];
+    const lineContainers: Array<{ cue: SubtitleLine; el: HTMLElement }> = [];
+
+    for (let i = 0; i < visible.length; i++) {
+      const cue = visible[i];
+      const itemEl = document.createElement('div');
+      itemEl.className = 'ks-history-item';
+      itemEl.dataset.subId = cue.id;
+      if (this.browserActiveIds.has(cue.id)) {
+        itemEl.classList.add('ks-active');
+      }
+      // Live AI mode: the newest line (bottom) is the "active" one
+      if (isLive && start + i === lines.length - 1) {
+        itemEl.classList.add('ks-active');
+      }
+      const timeStr =
+        cue.videoTimeSec !== undefined
+          ? `⏵ ${formatSeconds(cue.videoTimeSec)}`
+          : new Date(cue.timestampMs).toLocaleTimeString();
+      const badge = isLive ? (cue.latencyMs ? `${cue.latencyMs}ms` : cue.source) : `#${start + i + 1}`;
+      itemEl.innerHTML = `
+        <div class="ks-history-meta"><span>${escapeHtml(timeStr)}</span><span>${escapeHtml(badge)}</span></div>
+        <div class="ks-history-text"></div>
+      `;
+      frag.appendChild(itemEl);
+      lineContainers.push({ cue, el: itemEl });
+    }
+
+    this.sidebarListEl.innerHTML = '';
+    this.sidebarListEl.appendChild(frag);
+
+    // Tokenize each visible line (reusing cached MeCab morphemes) and make words hoverable
+    for (const { cue, el } of lineContainers) {
+      const textEl = el.querySelector<HTMLElement>('.ks-history-text')!;
+      const tokens = this.renderBrowserLineTokens(cue, textEl);
+      allTokens.push(...tokens);
+    }
+
+    // Prefetch dictionary entries + verify compounds/expressions for the whole window
+    this.prefetchSubtitleWords(allTokens);
+
+    if (this.browserFollowLive) {
+      this.scrollBrowserToActive();
+    }
+    // Sync the "Follow live" pill visibility without re-entering updateBrowserActive()
+    const followBtn = this.sidebarEl.querySelector<HTMLElement>('.ks-follow-btn');
+    if (followBtn) followBtn.style.display = this.browserFollowLive ? 'none' : 'flex';
+  }
+
+  /**
+   * Tokenizes one browser line into interactive word spans (Migaku-style: hover any word
+   * in the transcript panel for instant dictionary lookups & card mining).
+   */
+  private renderBrowserLineTokens(cue: SubtitleLine, textEl: HTMLElement): Token[] {
+    const lineText = cue.text.replace(/\n/g, ' ').trim();
+    textEl.innerHTML = '';
+    if (!lineText) return [];
+
+    const cachedMorphemes = this.morphemeCache.get(lineText);
+    const tokens = cachedMorphemes
+      ? buildTokensFromMorphemes(
+          cachedMorphemes,
+          this.vocabMap,
+          this.readingCache,
+          this.verifiedCompounds
+        )
+      : tokenizeJapanese(lineText, this.vocabMap, this.readingCache, this.verifiedCompounds);
+
+    if (!cachedMorphemes) {
+      this.requestMeCabTokenization(lineText, undefined, { cueId: cue.id, container: textEl });
+    }
+
+    const furiganaMode = this.settings.overlay.furiganaMode;
+
+    for (const token of tokens) {
+      const span = document.createElement('span');
+      span.className = `ks-token ks-status-${token.status}`;
+      if (token.isWord) {
+        span.classList.add('ks-word');
+      }
+      if (
+        (token.status === 'unknown' && !this.settings.overlay.highlightUnknown) ||
+        (token.status === 'learning' && !this.settings.overlay.highlightLearning)
+      ) {
+        span.classList.add('ks-no-highlight');
+      }
+
+      const showFurigana =
+        token.hasKanji &&
+        token.reading &&
+        (furiganaMode === 'all' ||
+          (furiganaMode === 'unknown_and_learning' &&
+            (token.status === 'unknown' || token.status === 'learning')));
+
+      if (showFurigana && token.reading) {
+        const ruby = document.createElement('ruby');
+        ruby.textContent = token.surface;
+        const rt = document.createElement('rt');
+        rt.textContent = token.reading;
+        ruby.appendChild(rt);
+        span.appendChild(ruby);
+      } else {
+        span.textContent = token.surface;
+      }
+
+      if (token.isWord) {
+        const captureRowContext = () => {
+          this.activeRowSentence = lineText;
+          if (cue.videoTimeSec !== undefined) {
+            this.activeRowRange = {
+              startSec: Math.max(0, cue.videoTimeSec + this.subtitleOffsetSec),
+              endSec: Math.max(
+                0,
+                (cue.endTimeSec ?? cue.videoTimeSec + 4) + this.subtitleOffsetSec
+              ),
+            };
+          } else {
+            this.activeRowRange = null;
+          }
+        };
+        span.addEventListener('mouseenter', () => {
+          if (this.hoverCloseTimer) {
+            clearTimeout(this.hoverCloseTimer);
+            this.hoverCloseTimer = null;
+          }
+          captureRowContext();
+          void this.openPopoverForToken(token, span, true);
+        });
+        span.addEventListener('click', (e) => {
+          e.stopPropagation();
+          captureRowContext();
+          void this.openPopoverForToken(token, span, true);
+        });
+      }
+
+      textEl.appendChild(span);
+    }
+
+    return tokens;
+  }
+
+  /**
+   * Cheap active-line update: re-highlights the current cue and keeps it centered.
+   * Re-renders the window only when the playhead crossed the window edge.
+   */
+  private updateBrowserActive() {
+    if (this.sidebarMode !== 'browser') return;
+    const lines = this.getBrowserLines();
+    if (lines.length === 0) return;
+
+    const activeIdx = this.getBrowserActiveIdx(lines);
+
+    // During silent high-speed prescan the playhead sweeps the episode far too fast
+    // to re-render the panel per cue — skip until it finishes.
+    if (this.captureState.status === 'prescanning') return;
+
+    // Re-anchor the window only when the playhead drifted within 5 lines of the window
+    // edge AND the window would actually change (guards against re-render loops at the
+    // head/tail of the transcript).
+    if (this.browserWindowRange && this.browserFollowLive) {
+      const nearStart =
+        activeIdx - this.browserWindowRange.start < 5 && this.browserWindowRange.start > 0;
+      const nearEnd =
+        this.browserWindowRange.end - 1 - activeIdx < 5 && this.browserWindowRange.end < lines.length;
+      if (nearStart || nearEnd) {
+        this.renderSubtitleBrowser();
+        return;
+      }
+    }
+
+    this.sidebarListEl
+      .querySelectorAll('.ks-history-item.ks-active')
+      .forEach((el) => el.classList.remove('ks-active'));
+    const items = this.sidebarListEl.querySelectorAll<HTMLElement>('.ks-history-item');
+    let activeEl: HTMLElement | null = null;
+    for (const el of items) {
+      if (el.dataset.subId && this.browserActiveIds.has(el.dataset.subId)) {
+        el.classList.add('ks-active');
+        activeEl = activeEl ?? el;
+      }
+    }
+    // Live mode: highlight the newest line
+    if (this.loadedFileSubtitles.length === 0 && !activeEl && items.length > 0) {
+      const last = items[items.length - 1];
+      last.classList.add('ks-active');
+      activeEl = last;
+    }
+
+    if (this.browserFollowLive && activeEl) {
+      this.scrollBrowserToActive();
+    }
+  }
+
+  private scrollBrowserToActive() {
+    const activeEl = this.sidebarListEl.querySelector<HTMLElement>('.ks-history-item.ks-active');
+    if (!activeEl) return;
+    const listRect = this.sidebarListEl.getBoundingClientRect();
+    const elRect = activeEl.getBoundingClientRect();
+    const target =
+      this.sidebarListEl.scrollTop +
+      (elRect.top - listRect.top) -
+      listRect.height / 2 +
+      elRect.height / 2;
+    this.sidebarListEl.scrollTop = Math.max(0, target);
+  }
+
+  /**
+   * Live AI subtitle updates: only yank the panel when following; if the user scrolled
+   * away to read, leave their view untouched until they click "Follow live".
+   */
+  private updateLiveBrowser() {
+    if (this.loadedFileSubtitles.length > 0) return;
+    if (!this.browserFollowLive) return;
+    this.renderSubtitleBrowser();
+  }
+
+  private setBrowserFollow(follow: boolean) {
+    this.browserFollowLive = follow;
+    const btn = this.sidebarEl.querySelector<HTMLElement>('.ks-follow-btn');
+    if (btn) btn.style.display = follow ? 'none' : 'flex';
+    if (follow) {
+      this.updateBrowserActive();
+    }
+  }
+
+  /** Re-renders only the browser lines that contain a just-verified compound/expression. */
+  private patchBrowserLines(compound: string) {
+    if (this.sidebarMode !== 'browser') return;
+    const lines = this.getBrowserLines();
+    if (lines.length === 0) return;
+    const items = this.sidebarListEl.querySelectorAll<HTMLElement>('.ks-history-item');
+    for (const item of items) {
+      const cueId = item.dataset.subId;
+      if (!cueId) continue;
+      const cue = lines.find((c) => c.id === cueId);
+      if (!cue || !cue.text.replace(/\n/g, '').includes(compound)) continue;
+      const textEl = item.querySelector<HTMLElement>('.ks-history-text');
+      if (textEl) {
+        this.renderBrowserLineTokens(cue, textEl);
+      }
+    }
   }
 
   private async renderLibrarySidebar() {

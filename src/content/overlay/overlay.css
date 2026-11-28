@@ -385,7 +385,7 @@
   padding: 7px 10px;
 }
 
-/* Transcript History Sidebar */
+/* Subtitle Browser Sidebar (Migaku-style full transcript panel) */
 .ks-sidebar {
   position: absolute;
   top: 60px;
@@ -453,6 +453,59 @@
   font-size: 14px;
   color: #f1f5f9;
   line-height: 1.45;
+}
+
+/* Active (currently playing) line in the subtitle browser */
+.ks-history-item.ks-active {
+  background: rgba(99, 102, 241, 0.22);
+  border-color: rgba(129, 140, 248, 0.65);
+  box-shadow: inset 3px 0 0 #818cf8;
+}
+
+/* Tokenized words inside the browser panel */
+.ks-history-text .ks-token {
+  font-size: 13px;
+}
+
+.ks-history-text .ks-token rt {
+  font-size: 8px;
+}
+
+.ks-sidebar-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ks-btn-icon {
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* Floating "Follow live" pill shown when the user scrolls away from the playhead */
+.ks-follow-btn {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  background: #4f46e5;
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(79, 70, 229, 0.55);
+  z-index: 5;
+}
+
+.ks-follow-btn:hover {
+  background: #6366f1;
 }
 
 /* Toast Notification */

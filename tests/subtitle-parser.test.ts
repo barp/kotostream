@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   findActiveSubtitlesAtTime,
+  findCueIndexNearTime,
   findSubtitleAtTime,
   formatSubtitlesToSrt,
   parseSubtitleFile,
@@ -26,6 +27,30 @@ describe('subtitle-parser & library helpers', () => {
     expect(findSubtitleAtTime(cues, 4.5)).toBeNull();
     // With +2.0s offset (subtitles delayed by 2s), video time 4.5s matches 2.5s cue!
     expect(findSubtitleAtTime(cues, 4.5, 2.0)?.text).toBe('今日はいい天気ですね。');
+  });
+
+  it('finds the transcript index nearest the video playhead for the subtitle browser', () => {
+    const srt = [
+      '1',
+      '00:00:01,000 --> 00:00:02,000',
+      '一行目',
+      '',
+      '2',
+      '00:00:05,000 --> 00:00:06,000',
+      '二行目',
+      '',
+      '3',
+      '00:00:10,000 --> 00:00:11,000',
+      '三行目',
+    ].join('\n');
+    const cues = parseSubtitleFile(srt);
+
+    expect(findCueIndexNearTime(cues, 0.5)).toBe(0); // before the first line starts
+    expect(findCueIndexNearTime(cues, 1.2)).toBe(0); // inside line 1
+    expect(findCueIndexNearTime(cues, 5.5)).toBe(1); // inside line 2
+    expect(findCueIndexNearTime(cues, 10.9)).toBe(2); // inside line 3
+    expect(findCueIndexNearTime(cues, 999)).toBe(2); // after the last line
+    expect(findCueIndexNearTime([], 5)).toBe(0); // empty transcript is safe
   });
 
   it('parses WebVTT files', () => {

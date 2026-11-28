@@ -128,6 +128,30 @@ export function findSubtitleAtTime(
 }
 
 /**
+ * Binary-searches a start-time-sorted subtitle list for the index of the last cue whose
+ * start time is <= `timeSec` (the transcript line at/near the video playhead). Returns 0
+ * when no cue starts before `timeSec`. Used by the sidebar subtitle browser to anchor its
+ * rendered window around the current playback position.
+ */
+export function findCueIndexNearTime(subtitles: SubtitleLine[], timeSec: number): number {
+  if (subtitles.length === 0) return 0;
+  let lo = 0;
+  let hi = subtitles.length - 1;
+  let ans = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const start = subtitles[mid].videoTimeSec ?? 0;
+    if (start <= timeSec) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return ans;
+}
+
+/**
  * Finds all active subtitles at a given video time (applying sync offsetSec).
  * When 2 characters speak simultaneously in .srt/.ass, returns up to 2 overlapping cues
  * so they render cleanly as Top + Bottom rows!
