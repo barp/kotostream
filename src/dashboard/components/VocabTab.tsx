@@ -3,6 +3,7 @@ import type { AppSettings, MinedCard, VocabEntry, WordStatus } from '../../types
 import {
   bulkImportVocabEntries,
   deleteMinedCard,
+  getCardMedia,
   getVocabMap,
   hydrateMinedCard,
   setWordStatus,
@@ -16,6 +17,7 @@ import {
   parseMigakuExport,
   parseMigakuFile,
 } from '../../core/migaku-import';
+import { CheckIcon, DownloadIcon, PlayIcon, StopIcon, UploadIcon } from '../../components/Icons';
 
 const CARDS_PER_PAGE = 25;
 const VOCAB_PER_PAGE = 50;
@@ -41,6 +43,8 @@ export const VocabTab: React.FC<VocabTabProps> = ({
   const [cardPage, setCardPage] = useState(1);
   const [syncingCardId, setSyncingCardId] = useState<string | null>(null);
   const [playingCardId, setPlayingCardId] = useState<string | null>(null);
+  const [confirmDeleteCardId, setConfirmDeleteCardId] = useState<string | null>(null);
+  const [cardThumbs, setCardThumbs] = useState<Record<string, string>>({});
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   // Tracked vocab filter & pagination
@@ -91,10 +95,44 @@ export const VocabTab: React.FC<VocabTabProps> = ({
 
   const totalCardPages = Math.max(1, Math.ceil(filteredCards.length / CARDS_PER_PAGE));
   const safeCardPage = Math.min(cardPage, totalCardPages);
-  const pagedCards = filteredCards.slice(
-    (safeCardPage - 1) * CARDS_PER_PAGE,
-    safeCardPage * CARDS_PER_PAGE
+  const pagedCards = useMemo(
+    () =>
+      filteredCards.slice(
+        (safeCardPage - 1) * CARDS_PER_PAGE,
+        safeCardPage * CARDS_PER_PAGE
+      ),
+    [filteredCards, safeCardPage]
   );
+
+  // Lazily hydrate screenshots only for cards visible on the current gallery page
+  useEffect(() => {
+    let cancelled = false;
+    const missing = pagedCards.filter(
+      (c) => (c.hasScreenshot || c.screenshotDataUrl) && !cardThumbs[c.id]
+    );
+    if (missing.length === 0) return;
+
+    void Promise.all(
+      missing.map(async (c) => {
+        if (c.screenshotDataUrl) return [c.id, c.screenshotDataUrl] as const;
+        const media = await getCardMedia(c.id);
+        return media.screenshotDataUrl ? ([c.id, media.screenshotDataUrl] as const) : null;
+      })
+    ).then((results) => {
+      if (cancelled) return;
+      const updates: Record<string, string> = {};
+      for (const pair of results) {
+        if (pair) updates[pair[0]] = pair[1];
+      }
+      if (Object.keys(updates).length > 0) {
+        setCardThumbs((prev) => ({ ...prev, ...updates }));
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pagedCards, cardThumbs]);
 
   const vocabEntries = useMemo(() => Object.values(vocabMap), [vocabMap]);
 
@@ -178,7 +216,7 @@ export const VocabTab: React.FC<VocabTabProps> = ({
   };
 
   const handleDeleteCard = async (card: MinedCard) => {
-    if (!window.confirm(`Delete mined card “${card.word}”? This cannot be undone.`)) return;
+    setConfirmDeleteCardId(null);
     await deleteMinedCard(card.id);
     await onReload();
     onNotice('success', `Deleted mined card “${card.word}”.`);
@@ -295,15 +333,55 @@ export const VocabTab: React.FC<VocabTabProps> = ({
   const vocabStart = filteredVocab.length === 0 ? 0 : (safeVocabPage - 1) * VOCAB_PER_PAGE + 1;
   const vocabEnd = Math.min(filteredVocab.length, safeVocabPage * VOCAB_PER_PAGE);
 
+  const masteryTotal = statusCounts.known + statusCounts.learning + statusCounts.ignored;
+
   return (
     <div>
-      {/* Mined Cards Panel */}
+      {/* Immersion Progress Summary Strip */}
+      <div className="panel summary-strip">
+        <div className="kpi-grid">
+          <div className="kpi-item">
+            <span className="kpi-label">Known Words</span>
+            <span className="kpi-val known">{statusCounts.known.toLocaleString()}</span>
+          </div>
+          <div className="kpi-item">
+            <span className="kpi-label">Learning</span>
+            <span className="kpi-val learning">{statusCounts.learning.toLocaleString()}</span>
+          </div>
+          <div className="kpi-item">
+            <span className="kpi-label">Ignored</span>
+            <span className="kpi-val muted">{statusCounts.ignored.toLocaleString()}</span>
+          </div>
+          <div className="kpi-item">
+            <span className="kpi-label">Mined Cards</span>
+            <span className="kpi-val accent">{cards.length.toLocaleString()}</span>
+          </div>
+        </div>
+        {masteryTotal > 0 && (
+          <div className="mastery-track" aria-hidden="true">
+            <div
+              className="mastery-seg known"
+              style={{ width: `${(statusCounts.known / masteryTotal) * 100}%` }}
+            />
+            <div
+              className="mastery-seg learning"
+              style={{ width: `${(statusCounts.learning / masteryTotal) * 100}%` }}
+            />
+            <div
+              className="mastery-seg ignored"
+              style={{ width: `${(statusCounts.ignored / masteryTotal) * 100}%` }}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Mined Cards Gallery Panel */}
       <div className="panel">
         <div className="row between mb-md">
           <div>
             <h2>Mined Cards ({cards.length})</h2>
             <p className="panel-desc no-margin">
-              Review your mined cards, replay full-quality sentence audio, sync to AnkiConnect, or export as TSV.
+              Review your mined moments, replay 48 kHz sentence audio, sync to AnkiConnect, or export as TSV.
             </p>
           </div>
           <button
@@ -312,7 +390,7 @@ export const VocabTab: React.FC<VocabTabProps> = ({
             onClick={handleDownloadTsv}
             disabled={cards.length === 0}
           >
-            Export TSV
+            <DownloadIcon size={13} /> Export TSV
           </button>
         </div>
 
@@ -332,42 +410,81 @@ export const VocabTab: React.FC<VocabTabProps> = ({
         )}
 
         {cards.length === 0 ? (
-          <p className="panel-desc no-margin">No mined cards yet. Hover over any subtitle word and click “Mine Card”.</p>
+          <div className="empty-state">
+            <div className="empty-state-title">No mined cards yet</div>
+            <p className="panel-desc no-margin">
+              Hover over any Japanese word while watching a video and click <strong>Mine Card</strong> to capture the frame, audio, and sentence.
+            </p>
+          </div>
         ) : filteredCards.length === 0 ? (
           <p className="panel-desc no-margin">No mined cards match “{cardSearch}”.</p>
         ) : (
           <>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Word</th>
-                  <th>Sentence &amp; Translation</th>
-                  <th>Meaning</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pagedCards.map((c) => (
-                  <tr key={c.id}>
-                    <td>
-                      <strong>{c.word}</strong>
-                      <div className="sub-meta">{c.reading}</div>
-                    </td>
-                    <td className="card-sentence-cell">
-                      <div>{c.sentence}</div>
-                      {c.translation && <div className="card-trans">{c.translation}</div>}
-                    </td>
-                    <td>{c.meaning}</td>
-                    <td>
+            <div className="mined-grid">
+              {pagedCards.map((c) => {
+                const thumb = c.screenshotDataUrl || cardThumbs[c.id];
+                const hasAudio = Boolean(c.hasAudio || c.audioBase64);
+                const isPlaying = playingCardId === c.id;
+                return (
+                  <article className="mined-card" key={c.id}>
+                    {thumb && (
+                      <div className="mined-card-media">
+                        <img src={thumb} alt={c.word} loading="lazy" />
+                        <div className="mined-card-media-scrim" />
+                        {c.sourceTitle && (
+                          <span className="mined-source-chip" title={c.sourceTitle}>
+                            {c.sourceTitle}
+                          </span>
+                        )}
+                        {hasAudio && (
+                          <button
+                            type="button"
+                            className={`media-audio-pill ${isPlaying ? 'playing' : ''}`}
+                            onClick={() => void handlePlayCardAudio(c)}
+                            title={isPlaying ? 'Stop sentence audio' : 'Play sentence audio'}
+                          >
+                            {isPlaying ? <StopIcon size={11} /> : <PlayIcon size={11} />}
+                            <span>{isPlaying ? 'Playing' : 'Audio'}</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="mined-card-body">
+                      <div className="mined-card-head">
+                        <div className="mined-word-wrap">
+                          <span className="mined-word">{c.word}</span>
+                          {c.reading && c.reading !== c.word && (
+                            <span className="mined-reading">{c.reading}</span>
+                          )}
+                        </div>
+                        {c.ankiNoteId && (
+                          <span className="anki-synced-badge" title={`Anki Note #${c.ankiNoteId}`}>
+                            <CheckIcon size={11} /> Anki
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="mined-sentence">{c.sentence}</div>
+                      {c.translation && <div className="mined-translation">{c.translation}</div>}
+                      {c.meaning && <div className="mined-meaning">{c.meaning}</div>}
+
+                      {!thumb && c.sourceTitle && (
+                        <div className="sub-meta mt-sm">{c.sourceTitle}</div>
+                      )}
+                    </div>
+
+                    <div className="mined-card-footer">
                       <div className="row tight">
-                        {(c.hasAudio || c.audioBase64) && (
+                        {!thumb && hasAudio && (
                           <button
                             type="button"
                             className="btn btn-sm"
                             onClick={() => void handlePlayCardAudio(c)}
-                            title="Play sentence audio"
+                            title={isPlaying ? 'Stop sentence audio' : 'Play sentence audio'}
                           >
-                            {playingCardId === c.id ? '🔊 Playing' : '▶ Audio'}
+                            {isPlaying ? <StopIcon size={12} /> : <PlayIcon size={12} />}
+                            {isPlaying ? 'Stop' : 'Audio'}
                           </button>
                         )}
                         <button
@@ -379,22 +496,44 @@ export const VocabTab: React.FC<VocabTabProps> = ({
                           {syncingCardId === c.id
                             ? 'Sending…'
                             : c.ankiNoteId
-                              ? '✓ Re-send Anki'
+                              ? 'Re-send Anki'
                               : 'Send to Anki'}
                         </button>
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-danger"
-                          onClick={() => void handleDeleteCard(c)}
-                        >
-                          Delete
-                        </button>
                       </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+
+                      <div className="row tight">
+                        {confirmDeleteCardId === c.id ? (
+                          <>
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-danger"
+                              onClick={() => void handleDeleteCard(c)}
+                            >
+                              Confirm
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              onClick={() => setConfirmDeleteCardId(null)}
+                            >
+                              Cancel
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-ghost-danger"
+                            onClick={() => setConfirmDeleteCardId(c.id)}
+                          >
+                            Delete
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
 
             <div className="pagination-bar">
               <span className="pagination-info">
@@ -463,41 +602,41 @@ export const VocabTab: React.FC<VocabTabProps> = ({
           <p className="panel-desc no-margin">No tracked vocabulary entries match this filter.</p>
         ) : (
           <>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Word</th>
-                  <th>Reading</th>
-                  <th>Meaning</th>
-                  <th>Status</th>
-                  <th>Change</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pagedVocab.map((v) => (
-                  <tr key={v.word}>
-                    <td><strong>{v.word}</strong></td>
-                    <td>{v.reading}</td>
-                    <td>{v.meaning}</td>
-                    <td><span className={`pill ${v.status}`}>{v.status}</span></td>
-                    <td>
-                      <div className="status-btn-group">
-                        {ALL_STATUSES.map((st) => (
-                          <button
-                            key={st}
-                            type="button"
-                            className={`status-choice ${v.status === st ? `active-${st}` : ''}`}
-                            onClick={() => void handleVocabStatusChange(v.word, st)}
-                          >
-                            {st}
-                          </button>
-                        ))}
-                      </div>
-                    </td>
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Word</th>
+                    <th>Reading</th>
+                    <th>Meaning</th>
+                    <th>Status</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {pagedVocab.map((v) => (
+                    <tr key={v.word}>
+                      <td><strong>{v.word}</strong></td>
+                      <td>{v.reading}</td>
+                      <td>{v.meaning}</td>
+                      <td>
+                        <div className="status-btn-group">
+                          {ALL_STATUSES.map((st) => (
+                            <button
+                              key={st}
+                              type="button"
+                              className={`status-choice ${v.status === st ? `active-${st}` : ''}`}
+                              onClick={() => void handleVocabStatusChange(v.word, st)}
+                            >
+                              {st}
+                            </button>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
 
             <div className="pagination-bar">
               <span className="pagination-info">
@@ -555,7 +694,7 @@ export const VocabTab: React.FC<VocabTabProps> = ({
               : 'Drag & drop your Migaku export here — multiple files OK, .zip / .gz included'}
           </div>
           <label className="btn btn-primary file-btn">
-            Choose Migaku Export File(s)
+            <UploadIcon size={14} /> Choose Migaku Export File(s)
             <input
               type="file"
               multiple

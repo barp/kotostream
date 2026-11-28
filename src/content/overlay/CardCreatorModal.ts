@@ -1,6 +1,7 @@
 import type { AnkiSettings, CardType, ScreenshotFormat } from '../../types';
 import { buildAnkiFieldPreview } from '../../core/anki';
 import { escapeHtml, playBase64Audio } from './utils';
+import { OVERLAY_ICONS } from './icons';
 
 export interface CardDraft {
   word: string;
@@ -117,7 +118,7 @@ export class CardCreatorModal {
             <span class="ks-badge">${escapeHtml(anki.deckName)}</span>
             <span class="ks-badge common">${escapeHtml(anki.modelName)}</span>
           </div>
-          <button type="button" class="ks-btn" data-modal-action="close" aria-label="Close">✕</button>
+          <button type="button" class="ks-btn ks-btn-icon" data-modal-action="close" aria-label="Close">${OVERLAY_ICONS.close}</button>
         </div>
 
         <div class="ks-modal-body">
@@ -155,8 +156,8 @@ export class CardCreatorModal {
 
             <div class="ks-field">
               <label>
-                <span>Sentence Translation <span data-trans-status style="color:#a5b4fc;font-weight:500;margin-left:6px">${draft.translating ? 'Translating…' : ''}</span></span>
-                <button type="button" class="ks-btn" style="padding:2px 8px;font-size:11px" data-modal-action="retranslate">Re-translate</button>
+                <span>Sentence Translation <span data-trans-status class="ks-modal-trans-status">${draft.translating ? 'Translating…' : ''}</span></span>
+                <button type="button" class="ks-btn ks-btn-xs" data-modal-action="retranslate">Re-translate</button>
               </label>
               <textarea rows="2" data-draft-field="translation" placeholder="English translation of the sentence…">${escapeHtml(draft.translation)}</textarea>
             </div>
@@ -175,28 +176,28 @@ export class CardCreatorModal {
 
             ${
               draft.audioBase64
-                ? `<div class="ks-shot-box" style="flex-direction:row;align-items:center;justify-content:space-between;padding:8px 10px">
-                    <span class="ks-preview-audio-badge">🔊 Sentence Audio${draft.audioDurationSec ? ` (${draft.audioDurationSec}s WAV)` : ' (WAV)'}</span>
-                    <button type="button" class="ks-btn ks-btn-primary" data-modal-action="play-audio">▶ Play Audio</button>
+                ? `<div class="ks-shot-box ks-audio-box">
+                    <span class="ks-preview-audio-badge">${OVERLAY_ICONS.volume} Sentence Audio${draft.audioDurationSec ? ` (${draft.audioDurationSec}s WAV)` : ' (WAV)'}</span>
+                    <button type="button" class="ks-btn ks-btn-primary" data-modal-action="play-audio">${OVERLAY_ICONS.play} Play Audio</button>
                    </div>`
-                : `<div style="font-size:11px;color:#94a3b8">Audio clip: Open the KotoStream popup and load subtitles (or click “Enable Sentence Audio”) to buffer tab audio for mining.</div>`
+                : `<div class="ks-audio-hint">Audio clip: Open the KotoStream popup and load subtitles (or click “Enable Sentence Audio”) to buffer tab audio for mining.</div>`
             }
           </div>
 
           <div class="ks-modal-preview">
             <div class="ks-preview-heading">
               <span>Live Anki Field Preview</span>
-              <span style="font-size:11px;color:#94a3b8;font-weight:500">${escapeHtml(anki.furiganaFormat.replace('_', ' '))}</span>
+              <span class="ks-preview-format">${escapeHtml(anki.furiganaFormat.replace('_', ' '))}</span>
             </div>
-            <div data-preview-fields style="display:flex;flex-direction:column;gap:8px"></div>
+            <div data-preview-fields class="ks-preview-list"></div>
           </div>
         </div>
 
         <div class="ks-modal-footer">
-          <span style="font-size:11px;color:#94a3b8">
+          <span class="ks-modal-footer-note">
             ${anki.enabled ? 'Will save to Mined Cards and export to AnkiConnect' : 'Will save to Mined Cards (enable AnkiConnect in Settings to auto-export)'}
           </span>
-          <div style="display:flex;gap:8px">
+          <div class="ks-modal-footer-actions">
             <button type="button" class="ks-btn" data-modal-action="close">Cancel</button>
             <button type="button" class="ks-btn ks-btn-primary" data-modal-action="save">
               ${anki.enabled ? 'Create Card & Send to Anki' : 'Create Card'}
@@ -254,13 +255,13 @@ export class CardCreatorModal {
       ${
         d.screenshotDataUrl
           ? `<img class="ks-shot-img" data-shot-img src="${d.screenshotDataUrl}" alt="Video screenshot" />`
-          : `<div style="color:#94a3b8;font-size:12px;text-align:center;padding:18px" data-shot-empty>No screenshot captured</div>`
+          : `<div class="ks-shot-empty" data-shot-empty>No screenshot captured</div>`
       }
       <div class="ks-shot-bar">
         <span data-shot-meta>${escapeHtml(d.screenshotMeta || 'Clean video frame')}</span>
-        <div style="display:flex;gap:6px">
-          <button type="button" class="ks-btn" style="padding:3px 9px;font-size:11px" data-modal-action="retake-shot">Retake Screenshot</button>
-          ${d.screenshotDataUrl ? `<button type="button" class="ks-btn" style="padding:3px 9px;font-size:11px" data-modal-action="remove-shot">Remove</button>` : ''}
+        <div class="ks-shot-actions">
+          <button type="button" class="ks-btn ks-btn-xs" data-modal-action="retake-shot">Retake Screenshot</button>
+          ${d.screenshotDataUrl ? `<button type="button" class="ks-btn ks-btn-xs" data-modal-action="remove-shot">Remove</button>` : ''}
         </div>
       </div>
     `;
@@ -307,7 +308,7 @@ export class CardCreatorModal {
         playBtn.textContent = 'Playing…';
         await playBase64Audio(d.audioBase64, d.audioMimeType);
         window.setTimeout(() => {
-          if (playBtn.isConnected) playBtn.textContent = '▶ Play Audio';
+          if (playBtn.isConnected) playBtn.innerHTML = `${OVERLAY_ICONS.play} Play Audio`;
         }, Math.max(800, Math.round((d.audioDurationSec ?? 2) * 1000)));
       } else if (action === 'retranslate') {
         const statusEl = this.backdropEl.querySelector<HTMLElement>('[data-trans-status]');
@@ -382,7 +383,7 @@ export class CardCreatorModal {
     );
 
     if (previewFields.length === 0) {
-      container.innerHTML = `<div style="color:#94a3b8;font-size:12px">No Anki fields mapped yet. Configure Field Mapping in Settings.</div>`;
+      container.innerHTML = `<div class="ks-audio-hint">No Anki fields mapped yet. Configure Field Mapping in Settings.</div>`;
       return;
     }
 

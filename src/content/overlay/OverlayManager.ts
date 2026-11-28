@@ -35,6 +35,7 @@ import type { SiteAdapter } from '../adapters/base';
 import { escapeHtml, formatSeconds, playBase64Audio, safeSendMessage } from './utils';
 import { ClipCaptureController } from './ClipCaptureController';
 import { CardCreatorModal, type CardDraft } from './CardCreatorModal';
+import { OVERLAY_ICONS } from './icons';
 
 /** How many transcript lines to render above/below the active line in the sidebar browser. */
 const BROWSER_WINDOW_LINES = 80;
@@ -72,6 +73,7 @@ export class OverlayManager {
   private browserLinesCache: SubtitleLine[] | null = null;
   private browserLinesById = new Map<string, SubtitleLine>();
   private browserTokenObserver: IntersectionObserver | null = null;
+  private browserSearchQuery = '';
   private toolbarCollapsed = false;
 
   private activeToken: Token | null = null;
@@ -100,6 +102,8 @@ export class OverlayManager {
   private subtitleBoxEl!: HTMLDivElement;
   private popoverEl!: HTMLDivElement;
   private sidebarEl!: HTMLDivElement;
+  private sidebarSearchWrapEl!: HTMLDivElement;
+  private sidebarSearchInputEl!: HTMLInputElement;
   private sidebarListEl!: HTMLDivElement;
   private toastEl!: HTMLDivElement;
   private fileInputEl!: HTMLInputElement;
@@ -135,20 +139,23 @@ export class OverlayManager {
     this.toolbarEl.innerHTML = `
       <span class="ks-brand" data-action="brand-click" title="KotoStream (Alt+H to collapse/expand)"><span class="ks-dot"></span>KotoStream</span>
       <span class="ks-toolbar-controls">
-        <button class="ks-btn ks-btn-primary" data-action="toggle-capture" title="Silently pre-scan episode at 4x to generate Japanese subtitles">AI Pre-Scan</button>
+        <span class="ks-toolbar-sep" aria-hidden="true"></span>
+        <button class="ks-btn ks-btn-primary" data-action="toggle-capture" title="Silently pre-scan episode at 4x to generate Japanese subtitles">${OVERLAY_ICONS.sparkles} AI Pre-Scan</button>
+        <span class="ks-toolbar-sep" aria-hidden="true"></span>
         <button class="ks-btn" data-action="toggle-furigana" title="Cycle Furigana mode (Alt+F)">振り仮名</button>
         <button class="ks-btn" data-action="toggle-library" title="Saved Subtitle Library &amp; Jimaku">Library</button>
         <button class="ks-btn" data-action="load-file" title="Load .srt, .vtt, or .ass Japanese subtitles">Load Sub</button>
-        <span class="ks-sync-group" style="display:none;align-items:center;gap:4px">
+        <span class="ks-sync-group">
           <button class="ks-btn" data-action="sync-minus" title="Show subtitles 0.5s earlier">-0.5s</button>
           <button class="ks-btn" data-action="sync-reset" title="Click to reset sync offset to 0s">0.0s</button>
           <button class="ks-btn" data-action="sync-plus" title="Delay subtitles by 0.5s">+0.5s</button>
         </span>
+        <span class="ks-toolbar-sep" aria-hidden="true"></span>
         <button class="ks-btn" data-action="toggle-sidebar" title="Subtitle browser — browse past &amp; upcoming lines (Alt+S)">Subtitles</button>
-        <button class="ks-btn" data-action="open-settings" title="Settings &amp; Anki">⚙</button>
+        <button class="ks-btn ks-btn-icon" data-action="open-settings" title="Settings &amp; Anki" aria-label="Settings &amp; Anki">${OVERLAY_ICONS.settings}</button>
         <span class="ks-status-pill"></span>
       </span>
-      <button class="ks-btn ks-btn-icon" data-action="toggle-toolbar" title="Collapse toolbar (Alt+H)" aria-label="Collapse toolbar">▸</button>
+      <button class="ks-btn ks-btn-icon" data-action="toggle-toolbar" title="Collapse toolbar (Alt+H)" aria-label="Collapse toolbar">${OVERLAY_ICONS.chevronRight}</button>
     `;
     this.shadow.appendChild(this.toolbarEl);
 
@@ -186,13 +193,19 @@ export class OverlayManager {
       <div class="ks-sidebar-header">
         <span>Subtitles</span>
         <div class="ks-sidebar-header-actions">
-          <button class="ks-btn ks-btn-icon" data-action="follow-live" title="Jump back to the current line">⤓</button>
-          <button class="ks-btn ks-btn-icon" data-action="close-sidebar" aria-label="Close sidebar">✕</button>
+          <button class="ks-btn ks-btn-icon" data-action="follow-live" title="Jump back to the current line" aria-label="Jump to current line">${OVERLAY_ICONS.followDown}</button>
+          <button class="ks-btn ks-btn-icon" data-action="close-sidebar" aria-label="Close sidebar">${OVERLAY_ICONS.close}</button>
         </div>
       </div>
+      <div class="ks-sidebar-search-wrap">
+        ${OVERLAY_ICONS.search}
+        <input class="ks-sidebar-search" type="text" placeholder="Filter episode lines…" aria-label="Filter subtitle lines" />
+      </div>
       <div class="ks-sidebar-list"></div>
-      <button class="ks-follow-btn" data-action="follow-live">↓ Follow live</button>
+      <button class="ks-follow-btn" data-action="follow-live">${OVERLAY_ICONS.followDown} Follow live</button>
     `;
+    this.sidebarSearchWrapEl = this.sidebarEl.querySelector('.ks-sidebar-search-wrap')!;
+    this.sidebarSearchInputEl = this.sidebarEl.querySelector('.ks-sidebar-search')!;
     this.sidebarListEl = this.sidebarEl.querySelector('.ks-sidebar-list')!;
     this.shadow.appendChild(this.sidebarEl);
 
@@ -277,7 +290,9 @@ export class OverlayManager {
   private toggleToolbarCollapsed(force?: boolean) {
     this.toolbarCollapsed = force ?? !this.toolbarCollapsed;
     this.toolbarEl.classList.toggle('ks-collapsed', this.toolbarCollapsed);
-    this.toolbarToggleBtn.textContent = this.toolbarCollapsed ? '◂' : '▸';
+    this.toolbarToggleBtn.innerHTML = this.toolbarCollapsed
+      ? OVERLAY_ICONS.chevronLeft
+      : OVERLAY_ICONS.chevronRight;
     const label = this.toolbarCollapsed ? 'Expand toolbar (Alt+H)' : 'Collapse toolbar (Alt+H)';
     this.toolbarToggleBtn.title = label;
     this.toolbarToggleBtn.setAttribute('aria-label', label);
@@ -434,6 +449,16 @@ export class OverlayManager {
     this.sidebarListEl.addEventListener('touchmove', userScrollHandler, { passive: true });
     this.sidebarListEl.addEventListener('mousedown', userScrollHandler);
 
+    for (const evt of ['keydown', 'keyup', 'keypress'] as const) {
+      this.sidebarSearchInputEl.addEventListener(evt, (e) => e.stopPropagation());
+    }
+    this.sidebarSearchInputEl.addEventListener('input', () => {
+      this.browserSearchQuery = this.sidebarSearchInputEl.value.trim();
+      if (this.sidebarMode === 'browser') {
+        this.renderSubtitleBrowser();
+      }
+    });
+
     this.fileInputEl.addEventListener('change', async () => {
       const file = this.fileInputEl.files?.[0];
       if (!file) return;
@@ -572,7 +597,7 @@ export class OverlayManager {
     this.browserActiveIds = new Set();
     this.browserLinesCache = null;
     this.browserWindowRange = null;
-    this.syncGroupEl.style.display = 'inline-flex';
+    this.syncGroupEl.classList.add('ks-visible');
     this.updateSyncLabel();
     this.syncFileSubtitleToVideo();
     if (this.sidebarEl.classList.contains('ks-open') && this.sidebarMode === 'browser') {
@@ -754,13 +779,13 @@ export class OverlayManager {
         state.status === 'prescanning' ? 'Cancel AI Scan' : 'Stop AI Subs';
       this.toggleCaptureBtn.className = 'ks-btn ks-btn-danger';
     } else {
-      this.toggleCaptureBtn.textContent = 'AI Pre-Scan';
+      this.toggleCaptureBtn.innerHTML = `${OVERLAY_ICONS.sparkles} AI Pre-Scan`;
       this.toggleCaptureBtn.className = 'ks-btn ks-btn-primary';
     }
 
     this.statusPillEl.className = 'ks-status-pill';
     if (state.status === 'buffering') {
-      this.statusPillEl.textContent = '🔊 Audio buffer ready';
+      this.statusPillEl.innerHTML = `${OVERLAY_ICONS.volume}<span>Audio buffer ready</span>`;
     } else if (state.status === 'prescanning') {
       const pct = Math.round(state.progress * 100);
       const rateLabel = Number.isInteger(state.playbackRate)
@@ -769,7 +794,7 @@ export class OverlayManager {
       if (state.phase === 'finalizing') {
         this.statusPillEl.textContent = `Finalizing AI subs… (${state.linesGenerated} lines)`;
       } else {
-        this.statusPillEl.textContent = `🔇 Scanning ${rateLabel} · ${pct}% · ${state.linesGenerated} lines`;
+        this.statusPillEl.innerHTML = `${OVERLAY_ICONS.volumeMute}<span>Scanning ${escapeHtml(rateLabel)} · ${pct}% · ${state.linesGenerated} lines</span>`;
       }
     } else if (state.status === 'listening') {
       this.statusPillEl.textContent = state.lastLatencyMs
@@ -1187,7 +1212,7 @@ export class OverlayManager {
 
     let sensesHtml = '';
     if (loading) {
-      sensesHtml = `<div class="ks-def" style="color:#94a3b8">Looking up in JMdict…</div>`;
+      sensesHtml = `<div class="ks-def ks-muted-msg">Looking up in JMdict…</div>`;
     } else if (entry && entry.senses.length > 0) {
       sensesHtml = entry.senses
         .map(
@@ -1199,7 +1224,7 @@ export class OverlayManager {
         )
         .join('');
     } else {
-      sensesHtml = `<div class="ks-def" style="color:#94a3b8">No dictionary entry found for “${escapeHtml(token.surface)}”.</div>`;
+      sensesHtml = `<div class="ks-def ks-muted-msg">No dictionary entry found for “${escapeHtml(token.surface)}”.</div>`;
     }
 
     this.popoverEl.innerHTML = `
@@ -1208,9 +1233,9 @@ export class OverlayManager {
           <div class="ks-pop-word">${escapeHtml(word)}</div>
           ${reading && reading !== word ? `<div class="ks-pop-reading">${escapeHtml(reading)}</div>` : ''}
         </div>
-        <div style="display:flex;align-items:center;gap:6px">
+        <div class="ks-pop-header-right">
           <div class="ks-badges">${badgesHtml}</div>
-          <button class="ks-btn" style="padding:3px 8px;font-size:11px" data-pop-audio="play" title="Play captured sentence audio">🔊</button>
+          <button class="ks-btn ks-btn-xs" data-pop-audio="play" title="Play captured sentence audio" aria-label="Play sentence audio">${OVERLAY_ICONS.volume}</button>
         </div>
       </div>
       <div class="ks-pop-senses">${sensesHtml}</div>
@@ -1619,15 +1644,19 @@ export class OverlayManager {
   }
 
   private renderSubtitleBrowser() {
+    this.sidebarSearchWrapEl.classList.remove('ks-hidden');
     const titleEl = this.sidebarEl.querySelector('.ks-sidebar-header span');
-    const lines = this.getBrowserLines();
+    const allLines = this.getBrowserLines();
 
-    if (lines.length === 0) {
+    if (allLines.length === 0) {
       if (titleEl) titleEl.textContent = 'Subtitles';
-      this.sidebarListEl.innerHTML = `<div style="color:#94a3b8;font-size:12px;padding:12px;text-align:center">No subtitles yet. Load an .srt/.ass file, pick from Library, or run AI Pre-Scan.</div>`;
+      this.sidebarListEl.innerHTML = `<div class="ks-sidebar-empty">No subtitles yet. Load an .srt/.ass file, pick from Library, or run AI Pre-Scan.</div>`;
       this.browserWindowRange = null;
       return;
     }
+
+    const q = this.browserSearchQuery.toLowerCase();
+    const lines = q ? allLines.filter((c) => c.text.toLowerCase().includes(q)) : allLines;
 
     const isLive = this.loadedFileSubtitles.length === 0;
     if (titleEl) {
@@ -1636,7 +1665,15 @@ export class OverlayManager {
         : this.activeTrackName
           ? `Subtitles · ${this.activeTrackName}`
           : 'Subtitles';
-      titleEl.textContent = `${label} (${lines.length} lines)`;
+      titleEl.textContent = q
+        ? `${label} (${lines.length}/${allLines.length})`
+        : `${label} (${allLines.length} lines)`;
+    }
+
+    if (lines.length === 0) {
+      this.sidebarListEl.innerHTML = `<div class="ks-sidebar-empty">No lines match “${escapeHtml(this.browserSearchQuery)}”.</div>`;
+      this.browserWindowRange = null;
+      return;
     }
 
     const activeIdx = this.getBrowserActiveIdx(lines);
@@ -1826,7 +1863,7 @@ export class OverlayManager {
     const activeIdx = this.getBrowserActiveIdx(lines);
     if (this.captureState.status === 'prescanning') return;
 
-    if (this.browserWindowRange && this.browserFollowLive) {
+    if (this.browserWindowRange && this.browserFollowLive && !this.browserSearchQuery) {
       const nearStart =
         activeIdx - this.browserWindowRange.start < 5 && this.browserWindowRange.start > 0;
       const nearEnd =
@@ -1941,13 +1978,14 @@ export class OverlayManager {
   }
 
   private async renderLibrarySidebar() {
+    this.sidebarSearchWrapEl.classList.add('ks-hidden');
     const titleEl = this.sidebarEl.querySelector('.ks-sidebar-header span');
     if (titleEl) titleEl.textContent = 'Subtitle Library';
 
     const lib = await getSubtitleLibrary();
     const headerBtn = `
-      <div style="margin-bottom:8px">
-        <button class="ks-btn ks-btn-primary" style="width:100%;justify-content:center" data-action="open-subtitles-dashboard">
+      <div class="ks-sidebar-lib-cta">
+        <button class="ks-btn ks-btn-primary ks-btn-full" data-action="open-subtitles-dashboard">
           Search Jimaku / Pre-Generate Subtitles
         </button>
       </div>`;
@@ -1955,7 +1993,7 @@ export class OverlayManager {
     if (lib.length === 0) {
       this.sidebarListEl.innerHTML =
         headerBtn +
-        `<div style="color:#94a3b8;font-size:12px;padding:12px;text-align:center">No saved subtitle tracks yet. Search Jimaku.cc or import/pre-generate an .srt file in the Dashboard!</div>`;
+        `<div class="ks-sidebar-empty">No saved subtitle tracks yet. Search Jimaku.cc or import/pre-generate an .srt file in the Dashboard!</div>`;
       return;
     }
 
@@ -1965,13 +2003,13 @@ export class OverlayManager {
         .map((track) => {
           const isCurrent = track.id === this.activeTrackId;
           return `
-            <div class="ks-history-item" data-track-id="${escapeHtml(track.id)}" style="${isCurrent ? 'border-color:#818cf8;background:rgba(99,102,241,0.22)' : ''}">
+            <div class="ks-history-item ${isCurrent ? 'ks-lib-current' : ''}" data-track-id="${escapeHtml(track.id)}">
               <div class="ks-history-meta">
                 <span>${escapeHtml(track.source.toUpperCase())} · ${track.cues.length} lines</span>
                 <span>${isCurrent ? 'Active' : this.formatOffset(track.offsetSec)}</span>
               </div>
-              <div class="ks-history-text" style="font-weight:600">${escapeHtml(track.title || track.fileName)}</div>
-              <div style="font-size:11px;color:#94a3b8;margin-top:2px">${escapeHtml(track.fileName)}</div>
+              <div class="ks-history-text ks-lib-item-title">${escapeHtml(track.title || track.fileName)}</div>
+              <div class="ks-lib-item-file">${escapeHtml(track.fileName)}</div>
             </div>`;
         })
         .join('');

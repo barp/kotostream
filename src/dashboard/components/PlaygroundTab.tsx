@@ -192,27 +192,34 @@ export const PlaygroundTab: React.FC<PlaygroundTabProps> = ({
         />
       </div>
 
-      <div className="playground-sentence">
-        {pgTokens.map((t, idx) => (
-          <span
-            key={idx}
-            className={`pg-token status-${t.status}`}
-            onClick={() => void handlePgTokenClick(t)}
-          >
-            {t.hasKanji && t.reading
-              ? alignFuriganaSegments(t.surface, t.reading).map((seg, i) =>
-                  seg.isKanji ? (
-                    <ruby key={i}>
-                      {seg.surface}
-                      <rt>{seg.reading}</rt>
-                    </ruby>
-                  ) : (
-                    seg.surface
+      <div className="playground-stage">
+        <div className="playground-legend">
+          <span className="legend-item"><span className="legend-line unknown" /> Unknown</span>
+          <span className="legend-item"><span className="legend-line learning" /> Learning</span>
+          <span className="legend-item"><span className="legend-line known" /> Known</span>
+        </div>
+        <div className="playground-sentence">
+          {pgTokens.map((t, idx) => (
+            <span
+              key={idx}
+              className={`pg-token status-${t.status} ${pgSelectedToken === t ? 'selected' : ''}`}
+              onClick={() => void handlePgTokenClick(t)}
+            >
+              {t.hasKanji && t.reading
+                ? alignFuriganaSegments(t.surface, t.reading).map((seg, i) =>
+                    seg.isKanji ? (
+                      <ruby key={i}>
+                        {seg.surface}
+                        <rt>{seg.reading}</rt>
+                      </ruby>
+                    ) : (
+                      seg.surface
+                    )
                   )
-                )
-              : t.surface}
-          </span>
-        ))}
+                : t.surface}
+            </span>
+          ))}
+        </div>
       </div>
 
       {pgSelectedToken && (

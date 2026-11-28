@@ -1,0 +1,44 @@
+:root {
+  /* Midnight Sumi / Cinema Obsidian palette */
+  --ks-bg: #080a0f;
+  --ks-bg-radial: radial-gradient(900px circle at 50% -180px, rgba(99, 102, 241, 0.14), transparent 65%);
+  --ks-surface: #10131c;
+  --ks-surface-2: #151926;
+  --ks-surface-elevated: #1b2030;
+  --ks-surface-hover: #242b40;
+
+  /* Hairline & specular borders */
+  --ks-border: rgba(255, 255, 255, 0.08);
+  --ks-border-strong: rgba(255, 255, 255, 0.15);
+  --ks-border-accent: rgba(129, 140, 248, 0.42);
+  --ks-specular: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+
+  /* Typography */
+  --ks-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic UI', sans-serif;
+  --ks-font-jp: 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Yu Gothic', sans-serif;
+  --ks-text: #f4f6fb;
+  --ks-text-soft: #cdd5e4;
+  --ks-text-muted: #8b95ad;
+  --ks-text-dim: #8b95ad;
+
+  /* Accents & semantic mastery colors */
+  --ks-accent: #747bff;
+  --ks-accent-light: #b4bcff;
+  --ks-accent-soft: rgba(116, 123, 255, 0.16);
+  --ks-accent-grad: linear-gradient(135deg, #5b5ef7 0%, #7c5cff 100%);
+  --ks-accent-grad-hover: linear-gradient(135deg, #4c4ff0 0%, #6b4af5 100%);
+  --ks-accent-glow: 0 8px 24px -6px rgba(99, 102, 241, 0.52);
+
+  --ks-known: #34d399;
+  --ks-learning: #f5b942;
+  --ks-unknown: #f47272;
+  --ks-ignored: #8b95ad;
+  --ks-danger: #ef4444;
+
+  /* Elevation & motion */
+  --ks-shadow-sm: 0 4px 14px rgba(0, 0, 0, 0.32);
+  --ks-shadow-md: 0 14px 36px rgba(0, 0, 0, 0.48);
+  --ks-shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.68);
+  --ks-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ks-scrollbar-thumb: rgba(255, 255, 255, 0.16);
+}

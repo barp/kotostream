@@ -16,6 +16,7 @@ import { SubtitlesTab } from './components/SubtitlesTab';
 import { VocabTab } from './components/VocabTab';
 import { SettingsTab } from './components/SettingsTab';
 import { PlaygroundTab } from './components/PlaygroundTab';
+import { BookIcon, SlidersIcon, SparklesIcon, SubtitlesIcon } from '../components/Icons';
 
 type DashboardTab = 'subtitles' | 'vocab' | 'settings' | 'playground';
 
@@ -96,34 +97,40 @@ export const Dashboard: React.FC = () => {
           </div>
         </div>
 
-        <nav className="tabs">
+        <nav className="tabs" aria-label="Dashboard sections">
           <button
             type="button"
             className={`tab-btn ${tab === 'subtitles' ? 'active' : ''}`}
             onClick={() => selectTab('subtitles')}
           >
-            Subtitles ({subtitleLibrary.length})
+            <SubtitlesIcon size={14} />
+            <span>Subtitles</span>
+            <span className="tab-count">{subtitleLibrary.length}</span>
           </button>
           <button
             type="button"
             className={`tab-btn ${tab === 'vocab' ? 'active' : ''}`}
             onClick={() => selectTab('vocab')}
           >
-            Vocab &amp; Cards ({cards.length})
+            <BookIcon size={14} />
+            <span>Vocab &amp; Cards</span>
+            <span className="tab-count">{cards.length}</span>
           </button>
           <button
             type="button"
             className={`tab-btn ${tab === 'settings' ? 'active' : ''}`}
             onClick={() => selectTab('settings')}
           >
-            Settings &amp; Anki
+            <SlidersIcon size={14} />
+            <span>Settings &amp; Anki</span>
           </button>
           <button
             type="button"
             className={`tab-btn ${tab === 'playground' ? 'active' : ''}`}
             onClick={() => selectTab('playground')}
           >
-            Playground
+            <SparklesIcon size={14} />
+            <span>Playground</span>
           </button>
         </nav>
       </header>

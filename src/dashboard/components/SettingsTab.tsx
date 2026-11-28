@@ -15,6 +15,7 @@ import {
   testAnkiConnection,
 } from '../../core/anki';
 import { saveSettings } from '../../core/storage';
+import { ChevronDownIcon } from '../../components/Icons';
 
 const MIGAKU_FIELD_LABELS: Array<{ key: keyof AnkiFieldMapping; label: string; placeholder: string }> = [
   { key: 'targetWord', label: 'Target Word', placeholder: 'Target Word' },
@@ -550,101 +551,6 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             </div>
           )}
 
-          <div className="field">
-            <label>Translation Target Language</label>
-            <input
-              type="text"
-              value={draft.anki.translationTargetLang}
-              placeholder="en"
-              onChange={(e) =>
-                setDraft((s) => ({
-                  ...s,
-                  anki: { ...s.anki, translationTargetLang: e.target.value },
-                }))
-              }
-            />
-          </div>
-
-          <div className="field">
-            <label>Screenshot Format (Migaku-style clean video crop)</label>
-            <select
-              value={draft.anki.screenshotFormat}
-              onChange={(e) =>
-                setDraft((s) => ({
-                  ...s,
-                  anki: { ...s.anki, screenshotFormat: e.target.value as ScreenshotFormat },
-                }))
-              }
-            >
-              <option value="webp">WebP (Migaku default — crisp &amp; tiny)</option>
-              <option value="jpeg">JPEG</option>
-              <option value="png">PNG (Lossless)</option>
-            </select>
-          </div>
-
-          <div className="field">
-            <label>Screenshot Max Height (px)</label>
-            <select
-              value={draft.anki.screenshotMaxHeight}
-              onChange={(e) =>
-                setDraft((s) => ({
-                  ...s,
-                  anki: { ...s.anki, screenshotMaxHeight: Number(e.target.value) },
-                }))
-              }
-            >
-              <option value={360}>360p (Compact)</option>
-              <option value={480}>480p (Migaku recommended)</option>
-              <option value={720}>720p (HD)</option>
-              <option value={0}>Original Resolution</option>
-            </select>
-          </div>
-
-          <div className="field">
-            <label>
-              <span>Screenshot Quality</span>
-              <span className="range-val">{Math.round(draft.anki.screenshotQuality * 100)}%</span>
-            </label>
-            <div className="range-row">
-              <input
-                type="range"
-                className="range-slider"
-                min={0.3}
-                max={1}
-                step={0.02}
-                value={draft.anki.screenshotQuality}
-                onChange={(e) =>
-                  setDraft((s) => ({
-                    ...s,
-                    anki: { ...s.anki, screenshotQuality: Number(e.target.value) },
-                  }))
-                }
-              />
-            </div>
-          </div>
-
-          <div className="field">
-            <label>Card Tags (comma-separated)</label>
-            <input
-              type="text"
-              value={tagsInput}
-              placeholder="kotostream, prime-video"
-              onChange={(e) => {
-                const raw = e.target.value;
-                setTagsInput(raw);
-                setDraft((s) => ({
-                  ...s,
-                  anki: {
-                    ...s.anki,
-                    tags: raw
-                      .split(',')
-                      .map((t) => t.trim())
-                      .filter(Boolean),
-                  },
-                }));
-              }}
-            />
-          </div>
         </div>
 
         <div className="row spaced">
@@ -711,18 +617,126 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             />
             Capture sentence audio clip (48 kHz stereo WAV)
           </label>
-
-          <label className="checkbox-row">
-            <input
-              type="checkbox"
-              checked={draft.anki.allowDuplicate}
-              onChange={(e) =>
-                setDraft((s) => ({ ...s, anki: { ...s.anki, allowDuplicate: e.target.checked } }))
-              }
-            />
-            Allow duplicate Anki notes
-          </label>
         </div>
+
+        <details className="advanced-section">
+          <summary className="advanced-summary">
+            <span>Advanced Screenshot, Language &amp; Tag Options</span>
+            <ChevronDownIcon size={15} className="advanced-chevron" />
+          </summary>
+          <div className="advanced-body">
+            <div className="grid-2">
+              <div className="field">
+                <label>Translation Target Language</label>
+                <input
+                  type="text"
+                  value={draft.anki.translationTargetLang}
+                  placeholder="en"
+                  onChange={(e) =>
+                    setDraft((s) => ({
+                      ...s,
+                      anki: { ...s.anki, translationTargetLang: e.target.value },
+                    }))
+                  }
+                />
+              </div>
+
+              <div className="field">
+                <label>Screenshot Format (Migaku-style clean video crop)</label>
+                <select
+                  value={draft.anki.screenshotFormat}
+                  onChange={(e) =>
+                    setDraft((s) => ({
+                      ...s,
+                      anki: { ...s.anki, screenshotFormat: e.target.value as ScreenshotFormat },
+                    }))
+                  }
+                >
+                  <option value="webp">WebP (Migaku default — crisp &amp; tiny)</option>
+                  <option value="jpeg">JPEG</option>
+                  <option value="png">PNG (Lossless)</option>
+                </select>
+              </div>
+
+              <div className="field">
+                <label>Screenshot Max Height (px)</label>
+                <select
+                  value={draft.anki.screenshotMaxHeight}
+                  onChange={(e) =>
+                    setDraft((s) => ({
+                      ...s,
+                      anki: { ...s.anki, screenshotMaxHeight: Number(e.target.value) },
+                    }))
+                  }
+                >
+                  <option value={360}>360p (Compact)</option>
+                  <option value={480}>480p (Migaku recommended)</option>
+                  <option value={720}>720p (HD)</option>
+                  <option value={0}>Original Resolution</option>
+                </select>
+              </div>
+
+              <div className="field">
+                <label>
+                  <span>Screenshot Quality</span>
+                  <span className="range-val">{Math.round(draft.anki.screenshotQuality * 100)}%</span>
+                </label>
+                <div className="range-row">
+                  <input
+                    type="range"
+                    className="range-slider"
+                    min={0.3}
+                    max={1}
+                    step={0.02}
+                    value={draft.anki.screenshotQuality}
+                    onChange={(e) =>
+                      setDraft((s) => ({
+                        ...s,
+                        anki: { ...s.anki, screenshotQuality: Number(e.target.value) },
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+
+              <div className="field">
+                <label>Card Tags (comma-separated)</label>
+                <input
+                  type="text"
+                  value={tagsInput}
+                  placeholder="kotostream, prime-video"
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    setTagsInput(raw);
+                    setDraft((s) => ({
+                      ...s,
+                      anki: {
+                        ...s.anki,
+                        tags: raw
+                          .split(',')
+                          .map((t) => t.trim())
+                          .filter(Boolean),
+                      },
+                    }));
+                  }}
+                />
+              </div>
+            </div>
+
+            <div className="row spaced">
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={draft.anki.allowDuplicate}
+                  onChange={(e) =>
+                    setDraft((s) => ({ ...s, anki: { ...s.anki, allowDuplicate: e.target.checked } }))
+                  }
+                />
+                Allow duplicate Anki notes
+              </label>
+            </div>
+          </div>
+        </details>
       </div>
 
       {/* 4. AnkiConnect & Field Mapping */}

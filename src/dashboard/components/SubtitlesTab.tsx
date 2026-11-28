@@ -39,6 +39,7 @@ export const SubtitlesTab: React.FC<SubtitlesTabProps> = ({
   const [jimakuBusy, setJimakuBusy] = useState(false);
   const [batchProgress, setBatchProgress] = useState<string>('');
   const [batchBusy, setBatchBusy] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   // Sync draft when settings finishes initial load
   React.useEffect(() => {
@@ -202,7 +203,7 @@ export const SubtitlesTab: React.FC<SubtitlesTabProps> = ({
   };
 
   const handleDeleteTrack = async (track: SavedSubtitleTrack) => {
-    if (!window.confirm(`Delete saved subtitle track “${track.fileName}”?`)) return;
+    setConfirmDeleteId(null);
     await deleteSubtitleTrack(track.id);
     await onReload();
     onNotice('success', `Deleted “${track.fileName}”.`);
@@ -273,36 +274,38 @@ export const SubtitlesTab: React.FC<SubtitlesTabProps> = ({
         )}
 
         {jimakuFiles.length > 0 && (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Subtitle File</th>
-                <th>Size</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {jimakuFiles.slice(0, 40).map((f) => {
-                const isDirect = /\.(srt|ass|vtt)$/i.test(f.name);
-                return (
-                  <tr key={f.url}>
-                    <td>{f.name}</td>
-                    <td>{Math.max(1, Math.round(f.size / 1024))} KB</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="btn btn-sm btn-primary"
-                        disabled={jimakuBusy || !isDirect}
-                        onClick={() => void handleImportJimakuFile(f)}
-                      >
-                        {isDirect ? 'Save to Library' : 'Archive (.zip)'}
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Subtitle File</th>
+                  <th>Size</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {jimakuFiles.slice(0, 40).map((f) => {
+                  const isDirect = /\.(srt|ass|vtt)$/i.test(f.name);
+                  return (
+                    <tr key={f.url}>
+                      <td>{f.name}</td>
+                      <td>{Math.max(1, Math.round(f.size / 1024))} KB</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-primary"
+                          disabled={jimakuBusy || !isDirect}
+                          onClick={() => void handleImportJimakuFile(f)}
+                        >
+                          {isDirect ? 'Save to Library' : 'Archive (.zip)'}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 
@@ -351,45 +354,70 @@ export const SubtitlesTab: React.FC<SubtitlesTabProps> = ({
         {subtitleLibrary.length === 0 ? (
           <p className="panel-desc no-margin">No saved subtitle tracks yet.</p>
         ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Title / File</th>
-                <th>Source</th>
-                <th>Lines</th>
-                <th>Sync Offset</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {subtitleLibrary.map((track) => (
-                <tr key={track.id}>
-                  <td>
-                    <strong>{track.title}</strong>
-                    <div className="sub-meta">{track.fileName}</div>
-                    {track.urlKey && <div className="sub-bound">Bound to: {track.urlKey}</div>}
-                  </td>
-                  <td><span className="pill known">{track.source}</span></td>
-                  <td>{track.cues.length}</td>
-                  <td>{track.offsetSec >= 0 ? `+${track.offsetSec.toFixed(1)}s` : `${track.offsetSec.toFixed(1)}s`}</td>
-                  <td>
-                    <div className="row tight">
-                      <button type="button" className="btn btn-sm" onClick={() => handleDownloadTrackSrt(track)}>
-                        Download .SRT
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-sm btn-danger"
-                        onClick={() => void handleDeleteTrack(track)}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </td>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Title / File</th>
+                  <th>Source</th>
+                  <th>Lines</th>
+                  <th>Sync Offset</th>
+                  <th>Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {subtitleLibrary.map((track) => (
+                  <tr key={track.id}>
+                    <td>
+                      <strong>{track.title}</strong>
+                      <div className="sub-meta">{track.fileName}</div>
+                      {track.urlKey && <div className="sub-bound">Bound to: {track.urlKey}</div>}
+                    </td>
+                    <td>
+                      <span className={`pill source-${track.source}`}>
+                        {track.source === 'generated' ? 'AI pre-scan' : track.source}
+                      </span>
+                    </td>
+                    <td>{track.cues.length}</td>
+                    <td>{track.offsetSec >= 0 ? `+${track.offsetSec.toFixed(1)}s` : `${track.offsetSec.toFixed(1)}s`}</td>
+                    <td>
+                      <div className="row tight">
+                        <button type="button" className="btn btn-sm" onClick={() => handleDownloadTrackSrt(track)}>
+                          Download .SRT
+                        </button>
+                        {confirmDeleteId === track.id ? (
+                          <>
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-danger"
+                              onClick={() => void handleDeleteTrack(track)}
+                            >
+                              Confirm Delete
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              onClick={() => setConfirmDeleteId(null)}
+                            >
+                              Cancel
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-danger"
+                            onClick={() => setConfirmDeleteId(track.id)}
+                          >
+                            Delete
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>

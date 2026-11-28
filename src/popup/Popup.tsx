@@ -9,6 +9,14 @@ import type {
 import { getMinedCards, getSettings, getVocabMap, saveSettings, saveSubtitleTrack } from '../core/storage';
 import { parseMediaTitle } from '../core/title-parser';
 import { parseSubtitleFile } from '../core/subtitle-parser';
+import {
+  BookIcon,
+  SlidersIcon,
+  SparklesIcon,
+  SubtitlesIcon,
+  VolumeIcon,
+  VolumeMuteIcon,
+} from '../components/Icons';
 
 function detectSiteLabel(url?: string): string {
   if (!url) return 'Browser Tab';
@@ -545,17 +553,26 @@ export const Popup: React.FC = () => {
                       : effectiveCaptureState.status
                 }`}
               />
-              <span>
+              <span className="status-inline">
                 {effectiveCaptureState.status === 'idle' &&
                   (stateBelongsToOtherTab
                     ? 'Audio capture active in another tab'
                     : 'Sentence Audio Buffer: Off')}
-                {effectiveCaptureState.status === 'buffering' && '🔊 Sentence Audio Buffer: Active (60s stereo)'}
+                {effectiveCaptureState.status === 'buffering' && (
+                  <>
+                    <VolumeIcon size={13} /> Sentence Audio Buffer: Active (60s stereo)
+                  </>
+                )}
                 {effectiveCaptureState.status === 'starting' && 'Starting silent AI pre-scan…'}
                 {effectiveCaptureState.status === 'prescanning' &&
-                  (effectiveCaptureState.phase === 'finalizing'
-                    ? `Finalizing AI subtitles… (${effectiveCaptureState.linesGenerated} lines)`
-                    : `🔇 Silent AI Pre-Scan (${effectiveCaptureState.playbackRate}x) · ${Math.round(effectiveCaptureState.progress * 100)}%`)}
+                  (effectiveCaptureState.phase === 'finalizing' ? (
+                    `Finalizing AI subtitles… (${effectiveCaptureState.linesGenerated} lines)`
+                  ) : (
+                    <>
+                      <VolumeMuteIcon size={13} /> Silent AI Pre-Scan ({effectiveCaptureState.playbackRate}x) ·{' '}
+                      {Math.round(effectiveCaptureState.progress * 100)}%
+                    </>
+                  ))}
                 {effectiveCaptureState.status === 'listening' && 'Live AI Subs + Audio Buffer: Active'}
                 {effectiveCaptureState.status === 'transcribing' && 'Generating Japanese subtitles…'}
                 {effectiveCaptureState.status === 'error' && 'Capture error'}
@@ -620,33 +637,67 @@ export const Popup: React.FC = () => {
         </>
       )}
 
-      <div className="stats-grid">
-        <div className="stat-tile">
-          <div className="stat-val known">{stats.known}</div>
-          <div className="stat-label">Known</div>
+      <div className="stats-card">
+        <div className="stats-grid">
+          <div className="stat-tile">
+            <div className="stat-val known">{stats.known.toLocaleString()}</div>
+            <div className="stat-label">Known</div>
+          </div>
+          <div className="stat-tile">
+            <div className="stat-val learning">{stats.learning.toLocaleString()}</div>
+            <div className="stat-label">Learning</div>
+          </div>
+          <div className="stat-tile">
+            <div className="stat-val mined">{stats.mined.toLocaleString()}</div>
+            <div className="stat-label">Mined</div>
+          </div>
         </div>
-        <div className="stat-tile">
-          <div className="stat-val learning">{stats.learning}</div>
-          <div className="stat-label">Learning</div>
-        </div>
-        <div className="stat-tile">
-          <div className="stat-val mined">{stats.mined}</div>
-          <div className="stat-label">Mined</div>
-        </div>
+        {stats.known + stats.learning > 0 && (
+          <div className="mastery-bar" aria-hidden="true">
+            <div
+              className="mastery-seg known"
+              style={{
+                width: `${(stats.known / Math.max(1, stats.known + stats.learning)) * 100}%`,
+              }}
+            />
+            <div
+              className="mastery-seg learning"
+              style={{
+                width: `${(stats.learning / Math.max(1, stats.known + stats.learning)) * 100}%`,
+              }}
+            />
+          </div>
+        )}
       </div>
 
       <div className="nav-grid">
-        <button type="button" className="btn" onClick={() => openDashboard('subtitles')}>
-          Subtitles Library
+        <button type="button" className="nav-tile" onClick={() => openDashboard('subtitles')}>
+          <span className="nav-tile-icon"><SubtitlesIcon size={15} /></span>
+          <span className="nav-tile-text">
+            <span className="nav-tile-title">Subtitles</span>
+            <span className="nav-tile-sub">Jimaku &amp; Library</span>
+          </span>
         </button>
-        <button type="button" className="btn" onClick={() => openDashboard('vocab')}>
-          Vocab &amp; Cards ({stats.mined})
+        <button type="button" className="nav-tile" onClick={() => openDashboard('vocab')}>
+          <span className="nav-tile-icon"><BookIcon size={15} /></span>
+          <span className="nav-tile-text">
+            <span className="nav-tile-title">Vocab &amp; Cards</span>
+            <span className="nav-tile-sub">{stats.mined} mined</span>
+          </span>
         </button>
-        <button type="button" className="btn" onClick={() => openDashboard('playground')}>
-          Playground
+        <button type="button" className="nav-tile" onClick={() => openDashboard('playground')}>
+          <span className="nav-tile-icon"><SparklesIcon size={15} /></span>
+          <span className="nav-tile-text">
+            <span className="nav-tile-title">Playground</span>
+            <span className="nav-tile-sub">Test &amp; Preview</span>
+          </span>
         </button>
-        <button type="button" className="btn" onClick={() => openDashboard('settings')}>
-          Settings &amp; Anki
+        <button type="button" className="nav-tile" onClick={() => openDashboard('settings')}>
+          <span className="nav-tile-icon"><SlidersIcon size={15} /></span>
+          <span className="nav-tile-text">
+            <span className="nav-tile-title">Settings</span>
+            <span className="nav-tile-sub">AI &amp; AnkiConnect</span>
+          </span>
         </button>
       </div>
     </div>
