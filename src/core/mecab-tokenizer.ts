@@ -1,7 +1,7 @@
 import type { Token, VocabEntry, WordStatus } from '../types';
 import { deconjugate } from './deconjugator';
 import { hasLocalExact, lookupLocal, PARTICLE_SET } from './dictionary';
-import { containsKanji, findVocabEntry, isJapaneseWord } from './tokenizer';
+import { containsKanji, EXPRESSION_PARTICLES, findVocabEntry, isJapaneseWord } from './tokenizer';
 
 export interface KuromojiMorpheme {
   surface_form: string;
@@ -208,24 +208,66 @@ export function buildTokensFromMorphemes(
     });
   }
 
-  // Pass 2: Dictionary-verified compound merging (e.g. 廃 + 課金 -> 廃課金, 依頼 + 人 -> 依頼人)
+  // Pass 2: Dictionary-verified expression & compound merging
+  // - 3-unit idiomatic expressions (e.g. 気 + を + そらす -> 気をそらす, 気 + を + そらした -> surface 気をそらした / baseForm 気をそらす)
+  // - 2-unit compounds (e.g. 廃 + 課金 -> 廃課金, 依頼 + 人 -> 依頼人, 見 + 定めた -> baseForm 見定める)
   const finalUnits: MergedUnit[] = [];
   for (let i = 0; i < units.length; i++) {
     const cur = units[i];
-    const next = units[i + 1];
-    if (cur.isWord && next?.isWord && isVerifiedCompound(cur.surface + next.surface)) {
-      const combined = cur.surface + next.surface;
-      finalUnits.push({
-        surface: combined,
-        baseForm: combined,
-        reading: readingCache[combined] || cur.reading + next.reading,
-        pos: cur.pos,
-        posDetail1: cur.posDetail1,
-        isWord: true,
-      });
-      i++;
-      continue;
+    const mid = units[i + 1];
+    const third = units[i + 2];
+
+    if (
+      cur.isWord &&
+      mid?.isWord &&
+      third?.isWord &&
+      EXPRESSION_PARTICLES.has(mid.surface)
+    ) {
+      const tripleBase = cur.surface + mid.surface + third.baseForm;
+      const tripleSurface = cur.surface + mid.surface + third.surface;
+      const matchedBase = isVerifiedCompound(tripleBase);
+      const matchedSurface = matchedBase || isVerifiedCompound(tripleSurface);
+      if (matchedSurface) {
+        const resolvedBase = matchedBase ? tripleBase : tripleSurface;
+        finalUnits.push({
+          surface: tripleSurface,
+          baseForm: resolvedBase,
+          reading:
+            readingCache[tripleSurface] ||
+            (tripleSurface === resolvedBase ? readingCache[resolvedBase] : undefined) ||
+            cur.reading + mid.reading + third.reading,
+          pos: third.pos,
+          posDetail1: third.posDetail1,
+          isWord: true,
+        });
+        i += 2;
+        continue;
+      }
     }
+
+    if (cur.isWord && mid?.isWord) {
+      const pairBase = cur.surface + mid.baseForm;
+      const pairSurface = cur.surface + mid.surface;
+      const matchedBase = isVerifiedCompound(pairBase);
+      const matchedSurface = matchedBase || isVerifiedCompound(pairSurface);
+      if (matchedSurface) {
+        const resolvedBase = matchedBase ? pairBase : pairSurface;
+        finalUnits.push({
+          surface: pairSurface,
+          baseForm: resolvedBase,
+          reading:
+            readingCache[pairSurface] ||
+            (pairSurface === resolvedBase ? readingCache[resolvedBase] : undefined) ||
+            cur.reading + mid.reading,
+          pos: cur.pos,
+          posDetail1: cur.posDetail1,
+          isWord: true,
+        });
+        i += 1;
+        continue;
+      }
+    }
+
     finalUnits.push(cur);
   }
 

@@ -37,13 +37,43 @@ export function isJapaneseWord(text: string): boolean {
   return JAPANESE_WORD_REGEX.test(text);
 }
 
+export const EXPRESSION_PARTICLES = new Set(['を', 'が', 'に', 'の', 'へ', 'と', 'で', 'も']);
+
 /**
- * Finds adjacent Japanese word pairs that could be a real dictionary compound
- * (both kanji-kanji nouns like 廃+課金 -> 廃課金 AND compound verbs/adjectives like 見+定める -> 見定める,
- * 取り+出す -> 取り出す, 見+定めた -> 見定めた) so the caller can verify them against JMdict/Jisho.
+ * Finds adjacent Japanese word pairs (e.g. 廃+課金 -> 廃課金, 見+定める -> 見定める)
+ * AND 3-token idiomatic expressions connected by a particle (e.g. 気+を+そらす -> 気をそらす,
+ * 気+を+そらした -> 気をそらす, 手+に+入れる -> 手に入れる, 腹+が+立つ -> 腹が立つ)
+ * so the caller can verify them against JMdict/Jisho (`exactOnly: true`).
  */
 export function findCandidateCompounds(tokens: Token[]): string[] {
   const candidates: string[] = [];
+  const seen = new Set<string>();
+  const addCandidate = (c: string) => {
+    if (c.length >= 2 && c.length <= 10 && !seen.has(c)) {
+      seen.add(c);
+      candidates.push(c);
+    }
+  };
+
+  // 1. 3-token idiomatic expressions: Word + Particle (を/が/に/の/へ/と/で/も) + Word
+  for (let i = 0; i < tokens.length - 2; i++) {
+    const a = tokens[i];
+    const mid = tokens[i + 1];
+    const c = tokens[i + 2];
+    if (!a.isWord || !mid.isWord || !c.isWord) continue;
+    if (!EXPRESSION_PARTICLES.has(mid.surface)) continue;
+    if (a.status === 'ignored' || PARTICLE_SET.has(a.surface)) continue;
+    if (c.status === 'ignored' || PARTICLE_SET.has(c.surface)) continue;
+    if (!a.hasKanji && !c.hasKanji) continue;
+
+    // Prefer dictionary form of the trailing verb/adjective (e.g. 気+を+そらした -> 気をそらす)
+    addCandidate(a.surface + mid.surface + c.baseForm);
+    if (c.surface !== c.baseForm) {
+      addCandidate(a.surface + mid.surface + c.surface);
+    }
+  }
+
+  // 2. 2-token compounds: Word + Word (kanji compounds & compound verbs)
   for (let i = 0; i < tokens.length - 1; i++) {
     const a = tokens[i];
     const b = tokens[i + 1];
@@ -54,11 +84,12 @@ export function findCandidateCompounds(tokens: Token[]): string[] {
     // Require at least one token to contain kanji so we catch both 廃+課金 and 見+定める / 取り+出す
     if (!a.hasKanji && !b.hasKanji) continue;
 
-    const combined = a.surface + b.surface;
-    if (combined.length >= 2 && combined.length <= 8) {
-      candidates.push(combined);
+    addCandidate(a.surface + b.baseForm);
+    if (b.surface !== b.baseForm) {
+      addCandidate(a.surface + b.surface);
     }
   }
+
   return candidates;
 }
 
@@ -229,13 +260,25 @@ export function tokenizeJapanese(
     }
   }
 
-  // Pass 3: Merge verified compound verbs whose second half had auxiliaries attached (e.g. 見 + 定めた -> 見定めた)
+  // Pass 3: Merge verified 3-token expressions (e.g. 気+を+そらす -> 気をそらす) and 2-token compounds (e.g. 見+定めた -> 見定めた)
   const merged: Array<{ text: string; isWordLike: boolean }> = [];
   for (let i = 0; i < auxMerged.length; i++) {
     const cur = auxMerged[i];
-    const next = auxMerged[i + 1];
-    if (cur.isWordLike && next?.isWordLike && isVerifiedCompound(cur.text + next.text)) {
-      merged.push({ text: cur.text + next.text, isWordLike: true });
+    const mid = auxMerged[i + 1];
+    const third = auxMerged[i + 2];
+    if (
+      cur.isWordLike &&
+      mid?.isWordLike &&
+      third?.isWordLike &&
+      EXPRESSION_PARTICLES.has(mid.text) &&
+      isVerifiedCompound(cur.text + mid.text + third.text)
+    ) {
+      merged.push({ text: cur.text + mid.text + third.text, isWordLike: true });
+      i += 2;
+      continue;
+    }
+    if (cur.isWordLike && mid?.isWordLike && isVerifiedCompound(cur.text + mid.text)) {
+      merged.push({ text: cur.text + mid.text, isWordLike: true });
       i += 1;
       continue;
     }

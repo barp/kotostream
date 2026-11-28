@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { analyzeWithMeCab, getMeCabTokenizer } from '../src/background/mecab';
 import { buildTokensFromMorphemes, katakanaToHiragana } from '../src/core/mecab-tokenizer';
+import { findCandidateCompounds } from '../src/core/tokenizer';
 import type { VocabEntry } from '../src/types';
 
 describe('MeCab / Kuromoji tokenizer on real anime subtitles (とある暗部の少女共棲)', () => {
@@ -78,5 +79,28 @@ describe('MeCab / Kuromoji tokenizer on real anime subtitles (とある暗部の
         expect(tok.isWord).toBe(false);
       }
     }
+  });
+
+  it('discovers and merges 3-token idiomatic expressions like 気をそらす (including conjugated forms)', async () => {
+    const mPlain = await analyzeWithMeCab('敵の気をそらすんだ。');
+    const initialPlain = buildTokensFromMorphemes(mPlain);
+    expect(findCandidateCompounds(initialPlain)).toContain('気をそらす');
+
+    const mergedPlain = buildTokensFromMorphemes(mPlain, {}, {}, new Set(['気をそらす']));
+    const hitPlain = mergedPlain.find((t) => t.surface === '気をそらす');
+    expect(hitPlain).toBeDefined();
+    expect(hitPlain?.baseForm).toBe('気をそらす');
+    expect(hitPlain?.reading).toBe('きをそらす');
+
+    // Conjugated form: 気をそらした -> candidate 気をそらす -> merged surface 気をそらした, baseForm 気をそらす
+    const mPast = await analyzeWithMeCab('一瞬だけ気をそらした。');
+    const initialPast = buildTokensFromMorphemes(mPast);
+    expect(findCandidateCompounds(initialPast)).toContain('気をそらす');
+
+    const mergedPast = buildTokensFromMorphemes(mPast, {}, {}, new Set(['気をそらす']));
+    const hitPast = mergedPast.find((t) => t.surface === '気をそらした');
+    expect(hitPast).toBeDefined();
+    expect(hitPast?.baseForm).toBe('気をそらす');
+    expect(hitPast?.reading).toBe('きをそらした');
   });
 });

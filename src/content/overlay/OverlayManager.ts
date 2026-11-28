@@ -865,10 +865,10 @@ export class OverlayManager {
   }
 
   private prefetchSubtitleWords(tokens: Token[]) {
-    // 1. Verify adjacent kanji pairs against JMdict/Jisho (exactOnly: true) — only merge if it's a REAL dictionary word!
+    // 1. Verify adjacent compounds & 3-token expressions (e.g. 気をそらす) against JMdict/Jisho (exactOnly: true)
     const compoundCandidates = findCandidateCompounds(tokens)
       .filter((c) => !this.checkedCompounds.has(c) && !this.verifiedCompounds.has(c))
-      .slice(0, 4);
+      .slice(0, 8);
 
     if (compoundCandidates.length > 0) {
       const renderedSubId = this.currentSubtitle?.id;
@@ -883,6 +883,9 @@ export class OverlayManager {
           if (entry) {
             this.verifiedCompounds.add(compound);
             this.verifiedCompounds.add(entry.word);
+            for (const alt of entry.altForms ?? []) {
+              this.verifiedCompounds.add(alt);
+            }
             this.entryCache.set(compound, entry);
             this.entryCache.set(entry.word, entry);
             if (entry.reading) {

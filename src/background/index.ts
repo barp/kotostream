@@ -616,7 +616,13 @@ async function handleWordLookup(
   // 0. Instant in-memory cache (0ms)
   const memHit =
     memoryDictCache.get(key) ?? (!exactOnly && surface ? memoryDictCache.get(surface) : undefined);
-  if (memHit && (!exactOnly || memHit.word === key || memHit.reading === key)) {
+  if (
+    memHit &&
+    (!exactOnly ||
+      memHit.word === key ||
+      memHit.reading === key ||
+      Boolean(memHit.altForms?.includes(key)))
+  ) {
     return memHit;
   }
 
