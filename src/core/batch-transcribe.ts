@@ -1,6 +1,6 @@
 import type { ExtensionMessage, SubtitleLine } from '../types';
+import { TARGET_SAMPLE_RATE, encodeWav, uint8ToBase64 } from './audio-dsp';
 
-const TARGET_SAMPLE_RATE = 16000;
 const CHUNK_DURATION_SEC = 25;
 
 /**
@@ -100,41 +100,4 @@ function isSilentPcm(samples: Int16Array): boolean {
     if (peak > 220) return false;
   }
   return true;
-}
-
-function encodeWav(samples: Int16Array, sampleRate: number): Uint8Array {
-  const dataSize = samples.length * 2;
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
-  const writeStr = (pos: number, str: string) => {
-    for (let i = 0; i < str.length; i++) view.setUint8(pos + i, str.charCodeAt(i));
-  };
-  writeStr(0, 'RIFF');
-  view.setUint32(4, 36 + dataSize, true);
-  writeStr(8, 'WAVE');
-  writeStr(12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeStr(36, 'data');
-  view.setUint32(40, dataSize, true);
-  let pos = 44;
-  for (let i = 0; i < samples.length; i++) {
-    view.setInt16(pos, samples[i], true);
-    pos += 2;
-  }
-  return new Uint8Array(buffer);
-}
-
-function uint8ToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-  }
-  return btoa(binary);
 }

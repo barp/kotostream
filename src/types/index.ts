@@ -35,7 +35,6 @@ export interface OverlaySettings {
   fontSizePx: number;
   bottomOffsetPx: number;
   backgroundOpacity: number;
-  showTranslationHint: boolean;
   highlightUnknown: boolean;
   highlightLearning: boolean;
 }
@@ -139,7 +138,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
     fontSizePx: 28,
     bottomOffsetPx: 68,
     backgroundOpacity: 0.78,
-    showTranslationHint: true,
     highlightUnknown: true,
     highlightLearning: true,
   },
@@ -237,14 +235,6 @@ export interface VocabEntry {
   updatedAt: number;
 }
 
-export interface SrsState {
-  intervalDays: number;
-  easeFactor: number;
-  repetitions: number;
-  dueAt: number;
-  lastReviewedAt?: number;
-}
-
 export interface MinedCard {
   id: string;
   word: string;
@@ -257,13 +247,14 @@ export interface MinedCard {
   cardType?: CardType;
   sourceTitle: string;
   sourceUrl: string;
+  hasScreenshot?: boolean;
   screenshotDataUrl?: string;
   screenshotFormat?: ScreenshotFormat;
+  hasAudio?: boolean;
   audioBase64?: string;
   audioMimeType?: string;
   createdAt: number;
   ankiNoteId?: number;
-  srs: SrsState;
 }
 
 export type CaptureState =
@@ -385,4 +376,4 @@ export type ExtensionMessage =
   | { type: 'APPLY_SUBTITLE_TRACK'; track: SavedSubtitleTrack }
   | { type: 'SET_ENABLED'; enabled: boolean }
   | { type: 'BATCH_TRANSCRIBE_CHUNK'; audioBase64: string; mimeType: string; chunkOffsetSec: number }
-  | { type: 'OPEN_DASHBOARD'; tab?: 'review' | 'vocab' | 'subtitles' | 'settings' | 'playground' };
+  | { type: 'OPEN_DASHBOARD'; tab?: 'vocab' | 'subtitles' | 'settings' | 'playground' };

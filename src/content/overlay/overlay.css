@@ -104,6 +104,12 @@
   border-color: rgba(148, 163, 184, 0.45);
 }
 
+.ks-btn:focus-visible,
+.ks-status-btn:focus-visible {
+  outline: 2px solid #818cf8;
+  outline-offset: 2px;
+}
+
 .ks-btn-primary {
   background: linear-gradient(135deg, #4f46e5, #7c3aed);
   border-color: rgba(167, 139, 250, 0.5);
@@ -371,6 +377,12 @@
   background: rgba(16, 185, 129, 0.25);
   border-color: #34d399;
   color: #a7f3d0;
+}
+
+.ks-status-btn.active-ignored {
+  background: rgba(100, 116, 139, 0.35);
+  border-color: #94a3b8;
+  color: #f1f5f9;
 }
 
 .ks-pop-actions {

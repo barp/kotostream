@@ -40,7 +40,7 @@ export const Popup: React.FC = () => {
   const [captureState, setCaptureState] = useState<CaptureState>({ status: 'idle' });
   const [lastSubtitle, setLastSubtitle] = useState<string>('');
   const [settings, setSettings] = useState<AppSettings | null>(null);
-  const [stats, setStats] = useState({ known: 0, learning: 0, due: 0 });
+  const [stats, setStats] = useState({ known: 0, learning: 0, mined: 0 });
 
   // Automatic Jimaku subtitle matching state
   const [searchQuery, setSearchQuery] = useState('');
@@ -128,7 +128,6 @@ export const Popup: React.FC = () => {
         return;
       }
 
-      // Auto-load files for the top matching show
       await loadFilesForEntry(entries[0], epStr);
     } catch {
       setSubError('Jimaku search failed.');
@@ -152,11 +151,10 @@ export const Popup: React.FC = () => {
       setSettings(loadedSettings);
 
       const entries = Object.values(vocab);
-      const now = Date.now();
       setStats({
         known: entries.filter((e) => e.status === 'known').length,
         learning: entries.filter((e) => e.status === 'learning').length,
-        due: cards.filter((c) => c.srs.dueAt <= now).length,
+        mined: cards.length,
       });
 
       const capRes = (await chrome.runtime.sendMessage({
@@ -164,7 +162,6 @@ export const Popup: React.FC = () => {
       } satisfies ExtensionMessage)) as { state?: CaptureState };
       if (capRes?.state) setCaptureState(capRes.state);
 
-      // Detect show title & episode number automatically from the active video tab (only when enabled)
       let detectedShow = '';
       let detectedEp = '';
       if (loadedSettings.enabled && activeTab?.id) {
@@ -182,7 +179,6 @@ export const Popup: React.FC = () => {
             type: 'GET_PAGE_MEDIA_INFO',
           } satisfies ExtensionMessage)) as typeof info;
         } catch {
-          // Content script wasn't active on this tab yet -> inject it and retry once
           try {
             await chrome.scripting.executeScript({
               target: { tabId: activeTab.id },
@@ -212,7 +208,6 @@ export const Popup: React.FC = () => {
       setSearchQuery(detectedShow);
       setEpisodeInput(detectedEp);
 
-      // Auto-search Jimaku if enabled, API key is set, and we detected a real show title
       const ignoredTitles = new Set(['Amazon Prime Video', 'Prime Video', 'YouTube', 'Netflix', 'New Tab', '']);
       if (loadedSettings.enabled && loadedSettings.subtitles.jimakuApiKey.trim() && !ignoredTitles.has(detectedShow)) {
         void runJimakuSearch(detectedShow, detectedEp);
@@ -262,7 +257,6 @@ export const Popup: React.FC = () => {
       });
 
       if (tabId) {
-        // Ensure content script is injected on this tab, apply the track, AND start the passive 15s audio ring buffer for Anki mining!
         await chrome.scripting
           .executeScript({ target: { tabId }, files: ['content.js'] })
           .catch(() => {});
@@ -333,7 +327,6 @@ export const Popup: React.FC = () => {
         await chrome.tabs
           .sendMessage(tabId, { type: 'SET_ENABLED', enabled: false } satisfies ExtensionMessage)
           .catch(() => {
-            // If an orphaned overlay from before an extension reload is on the page, remove it directly
             chrome.scripting
               .executeScript({
                 target: { tabId },
@@ -345,7 +338,6 @@ export const Popup: React.FC = () => {
           });
       }
     } else if (nextEnabled && tabId) {
-      // Ensure content script is active on this tab when re-enabled
       await chrome.scripting
         .executeScript({ target: { tabId }, files: ['content.js'] })
         .catch(() => {});
@@ -358,7 +350,7 @@ export const Popup: React.FC = () => {
     }
   };
 
-  const openDashboard = (tab: 'review' | 'vocab' | 'subtitles' | 'settings' | 'playground') => {
+  const openDashboard = (tab: 'vocab' | 'subtitles' | 'settings' | 'playground') => {
     chrome.runtime.sendMessage({ type: 'OPEN_DASHBOARD', tab } satisfies ExtensionMessage).catch(() => {});
   };
 
@@ -366,7 +358,7 @@ export const Popup: React.FC = () => {
     <div className="popup">
       <div className="header">
         <div className="brand">
-          <div className="logo" style={{ opacity: isEnabled ? 1 : 0.45 }}>言</div>
+          <div className={`logo ${isEnabled ? '' : 'dim'}`}>言</div>
           <div>
             <div className="brand-title">KotoStream</div>
             <div className="brand-sub">{siteLabel}</div>
@@ -393,8 +385,7 @@ export const Popup: React.FC = () => {
           </div>
           <button
             type="button"
-            className="btn btn-primary"
-            style={{ width: 'auto', padding: '7px 16px', fontSize: 12 }}
+            className="btn btn-primary btn-inline"
             onClick={() => void handleToggleExtension()}
           >
             Enable KotoStream
@@ -402,227 +393,193 @@ export const Popup: React.FC = () => {
         </div>
       ) : (
         <>
-          {/* Automatic Subtitle Matching Section */}
-      <div className="card">
-        <div className="section-title">
-          <span>Matching Subtitles (Jimaku)</span>
-          {activeTrackName && <span style={{ color: '#34d399', fontSize: 10 }}>● Synced</span>}
-        </div>
-
-        {activeTrackName && (
-          <div className="ok-box" style={{ marginTop: 0, marginBottom: 8 }}>
-            Active: <strong>{activeTrackName}</strong>
-            <div style={{ fontSize: 10, opacity: 0.85 }}>Use -0.5s / +0.5s on the video toolbar to fine-tune sync.</div>
-          </div>
-        )}
-
-        {settings && !settings.subtitles.jimakuApiKey.trim() ? (
-          <div>
-            <div style={{ fontSize: 11, color: '#cbd5e1', marginBottom: 6 }}>
-              Paste your free API key from <strong>jimaku.cc/account</strong> to auto-find Japanese subtitles:
+          <div className="card">
+            <div className="section-title">
+              <span>Matching Subtitles (Jimaku)</span>
+              {activeTrackName && <span className="sync-badge">● Synced</span>}
             </div>
-            <form className="mini-search" onSubmit={handleSaveJimakuKeyInline} style={{ marginBottom: 0 }}>
-              <input
-                type="password"
-                placeholder="Paste Jimaku API key…"
-                value={jimakuKeyDraft}
-                onChange={(e) => setJimakuKeyDraft(e.target.value)}
-                style={{ flex: 1 }}
-              />
-              <button type="submit" className="btn btn-primary btn-xs">
-                Save
-              </button>
-            </form>
-          </div>
-        ) : (
-          <>
-            <form
-              className="mini-search"
-              onSubmit={(e) => {
-                e.preventDefault();
-                void runJimakuSearch(searchQuery, episodeInput);
-              }}
-            >
-              <input
-                type="text"
-                placeholder="Show title…"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                style={{ flex: 1 }}
-              />
-              <input
-                type="number"
-                min={1}
-                placeholder="Ep"
-                value={episodeInput}
-                onChange={(e) => setEpisodeInput(e.target.value)}
-                style={{ width: 52 }}
-              />
-              <button type="submit" className="btn btn-primary btn-xs">
-                Find
-              </button>
-            </form>
 
-            {detectedRawTitle && (
-              <div
-                style={{
-                  fontSize: 10,
-                  color: '#64748b',
-                  marginBottom: 6,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-                title={detectedRawTitle}
-              >
-                Detected: {detectedRawTitle}
+            {activeTrackName && (
+              <div className="ok-box">
+                Active: <strong>{activeTrackName}</strong>
+                <div className="ok-sub">Use -0.5s / +0.5s on the video toolbar to fine-tune sync.</div>
               </div>
             )}
 
-            {jimakuEntries.length > 0 && (
-              <div className="chip-row">
-                {jimakuEntries.slice(0, 4).map((entry) => (
-                  <button
-                    key={entry.id}
-                    type="button"
-                    className={`chip ${selectedEntry?.id === entry.id ? 'active' : ''}`}
-                    title={entry.name}
-                    onClick={() => void loadFilesForEntry(entry, episodeInput)}
-                  >
-                    {entry.japanese_name || entry.name}
+            {settings && !settings.subtitles.jimakuApiKey.trim() ? (
+              <div>
+                <div className="key-hint">
+                  Paste your free API key from <strong>jimaku.cc/account</strong> to auto-find Japanese subtitles:
+                </div>
+                <form className="mini-search no-margin" onSubmit={handleSaveJimakuKeyInline}>
+                  <input
+                    className="input-grow"
+                    type="password"
+                    placeholder="Paste Jimaku API key…"
+                    value={jimakuKeyDraft}
+                    onChange={(e) => setJimakuKeyDraft(e.target.value)}
+                  />
+                  <button type="submit" className="btn btn-primary btn-xs">
+                    Save
                   </button>
-                ))}
+                </form>
               </div>
-            )}
+            ) : (
+              <>
+                <form
+                  className="mini-search"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void runJimakuSearch(searchQuery, episodeInput);
+                  }}
+                >
+                  <input
+                    className="input-grow"
+                    type="text"
+                    placeholder="Show title…"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                  />
+                  <input
+                    className="input-ep"
+                    type="number"
+                    min={1}
+                    placeholder="Ep"
+                    value={episodeInput}
+                    onChange={(e) => setEpisodeInput(e.target.value)}
+                  />
+                  <button type="submit" className="btn btn-primary btn-xs">
+                    Find
+                  </button>
+                </form>
 
-            {subStatus && (
-              <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 6 }}>{subStatus}</div>
-            )}
-
-            {subError && <div className="error-box" style={{ marginTop: 0, marginBottom: 6 }}>{subError}</div>}
-
-            {jimakuFiles.length > 0 && (
-              <div className="sub-list">
-                {jimakuFiles.slice(0, 8).map((file) => (
-                  <div className="sub-item" key={file.url}>
-                    <span className="sub-name" title={file.name}>{file.name}</span>
-                    <button
-                      type="button"
-                      className="btn btn-primary btn-xs"
-                      disabled={loadingFileUrl === file.url}
-                      onClick={() => void handleApplyJimakuFile(file)}
-                    >
-                      {loadingFileUrl === file.url ? '…' : 'Load'}
-                    </button>
+                {detectedRawTitle && (
+                  <div className="detected-title" title={detectedRawTitle}>
+                    Detected: {detectedRawTitle}
                   </div>
-                ))}
+                )}
+
+                {jimakuEntries.length > 0 && (
+                  <div className="chip-row">
+                    {jimakuEntries.slice(0, 4).map((entry) => (
+                      <button
+                        key={entry.id}
+                        type="button"
+                        className={`chip ${selectedEntry?.id === entry.id ? 'active' : ''}`}
+                        title={entry.name}
+                        onClick={() => void loadFilesForEntry(entry, episodeInput)}
+                      >
+                        {entry.japanese_name || entry.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {subStatus && <div className="status-note">{subStatus}</div>}
+
+                {subError && <div className="error-box tight">{subError}</div>}
+
+                {jimakuFiles.length > 0 && (
+                  <div className="sub-list">
+                    {jimakuFiles.map((file) => (
+                      <div className="sub-item" key={file.url}>
+                        <span className="sub-name" title={file.name}>{file.name}</span>
+                        <button
+                          type="button"
+                          className="btn btn-primary btn-xs"
+                          disabled={loadingFileUrl === file.url}
+                          onClick={() => void handleApplyJimakuFile(file)}
+                        >
+                          {loadingFileUrl === file.url ? '…' : 'Load'}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          <div className="card">
+            <div className="capture-status">
+              <span
+                className={`dot ${
+                  captureState.status === 'buffering'
+                    ? 'listening'
+                    : captureState.status === 'prescanning'
+                      ? 'transcribing'
+                      : captureState.status
+                }`}
+              />
+              <span>
+                {captureState.status === 'idle' && 'Sentence Audio Buffer: Off'}
+                {captureState.status === 'buffering' && '🔊 Sentence Audio Buffer: Active (60s stereo)'}
+                {captureState.status === 'starting' && 'Starting silent AI pre-scan…'}
+                {captureState.status === 'prescanning' &&
+                  (captureState.phase === 'finalizing'
+                    ? `Finalizing AI subtitles… (${captureState.linesGenerated} lines)`
+                    : `🔇 Silent AI Pre-Scan (${captureState.playbackRate}x) · ${Math.round(captureState.progress * 100)}%`)}
+                {captureState.status === 'listening' && 'Live AI Subs + Audio Buffer: Active'}
+                {captureState.status === 'transcribing' && 'Generating Japanese subtitles…'}
+                {captureState.status === 'error' && 'Capture error'}
+              </span>
+            </div>
+
+            {captureState.status === 'prescanning' && (
+              <div className="prescan-box">
+                <div className="progress-track">
+                  <div
+                    className="progress-fill"
+                    style={{
+                      width: `${Math.min(100, Math.max(2, Math.round(captureState.progress * 100)))}%`,
+                    }}
+                  />
+                </div>
+                <div className="progress-meta">
+                  <span>
+                    {formatSecClock(captureState.currentTimeSec)} / {formatSecClock(captureState.durationSec)}
+                  </span>
+                  <span>{captureState.linesGenerated} lines pre-created</span>
+                </div>
+                <div className="progress-hint">
+                  Sound is muted while scanning. You’ll get a notification as soon as subtitles are ready.
+                </div>
               </div>
             )}
-          </>
-        )}
-      </div>
 
-      {/* Sentence Audio Buffer & Live AI Pre-Scan Section */}
-      <div className="card">
-        <div className="capture-status">
-          <span
-            className={`dot ${
-              captureState.status === 'buffering'
-                ? 'listening'
-                : captureState.status === 'prescanning'
-                  ? 'transcribing'
-                  : captureState.status
-            }`}
-          />
-          <span>
-            {captureState.status === 'idle' && 'Sentence Audio Buffer: Off'}
-            {captureState.status === 'buffering' && '🔊 Sentence Audio Buffer: Active (15s local)'}
-            {captureState.status === 'starting' && 'Starting silent AI pre-scan…'}
-            {captureState.status === 'prescanning' &&
-              (captureState.phase === 'finalizing'
-                ? `Finalizing AI subtitles… (${captureState.linesGenerated} lines)`
-                : `🔇 Silent AI Pre-Scan (${captureState.playbackRate}x) · ${Math.round(captureState.progress * 100)}%`)}
-            {captureState.status === 'listening' && 'Live AI Subs + Audio Buffer: Active'}
-            {captureState.status === 'transcribing' && 'Generating Japanese subtitles…'}
-            {captureState.status === 'error' && 'Capture error'}
-          </span>
-        </div>
+            <div className="btn-row">
+              <button
+                type="button"
+                className={`btn btn-compact ${captureState.status === 'buffering' ? 'btn-danger' : 'btn-primary'}`}
+                disabled={captureState.status === 'prescanning'}
+                onClick={handleToggleAudioBuffer}
+              >
+                {captureState.status === 'buffering' ? 'Stop Audio Buffer' : 'Enable Sentence Audio'}
+              </button>
+              <button
+                type="button"
+                className={`btn btn-compact ${isCapturingLive ? 'btn-danger' : ''}`}
+                onClick={handleToggleCapture}
+              >
+                {captureState.status === 'prescanning'
+                  ? 'Cancel AI Scan'
+                  : isCapturingLive
+                    ? 'Stop AI Subs'
+                    : 'AI Pre-Scan Subs'}
+              </button>
+            </div>
 
-        {captureState.status === 'prescanning' && (
-          <div style={{ marginBottom: 8 }}>
-            <div
-              style={{
-                height: 6,
-                borderRadius: 999,
-                background: 'rgba(148, 163, 184, 0.2)',
-                overflow: 'hidden',
-                marginBottom: 5,
-              }}
-            >
-              <div
-                style={{
-                  height: '100%',
-                  width: `${Math.min(100, Math.max(2, Math.round(captureState.progress * 100)))}%`,
-                  background: 'linear-gradient(90deg, #6366f1, #a855f7)',
-                  transition: 'width 0.3s ease',
-                }}
-              />
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#94a3b8' }}>
-              <span>
-                {formatSecClock(captureState.currentTimeSec)} / {formatSecClock(captureState.durationSec)}
-              </span>
-              <span>{captureState.linesGenerated} lines pre-created</span>
-            </div>
-            <div style={{ fontSize: 10, color: '#64748b', marginTop: 3 }}>
-              Sound is muted while scanning. You’ll get a notification as soon as subtitles are ready.
-            </div>
+            {captureState.status === 'error' && (
+              <div className="error-box">{captureState.message}</div>
+            )}
+
+            {lastSubtitle && isCapturingLive && (
+              <div className="latest-sub">
+                <div className="latest-sub-label">Latest Subtitle:</div>
+                {lastSubtitle}
+              </div>
+            )}
           </div>
-        )}
-
-        <div style={{ display: 'flex', gap: 6 }}>
-          <button
-            className={`btn ${captureState.status === 'buffering' ? 'btn-danger' : 'btn-primary'}`}
-            style={{ fontSize: 12, padding: '7px 8px' }}
-            disabled={captureState.status === 'prescanning'}
-            onClick={handleToggleAudioBuffer}
-          >
-            {captureState.status === 'buffering' ? 'Stop Audio Buffer' : 'Enable Sentence Audio'}
-          </button>
-          <button
-            className={`btn ${isCapturingLive ? 'btn-danger' : ''}`}
-            style={{ fontSize: 12, padding: '7px 8px' }}
-            onClick={handleToggleCapture}
-          >
-            {captureState.status === 'prescanning'
-              ? 'Cancel AI Scan'
-              : isCapturingLive
-                ? 'Stop AI Subs'
-                : 'AI Pre-Scan Subs'}
-          </button>
-        </div>
-
-        {captureState.status === 'error' && (
-          <div className="error-box">{captureState.message}</div>
-        )}
-
-        {lastSubtitle && isCapturingLive && (
-          <div
-            style={{
-              marginTop: 8,
-              padding: '7px 9px',
-              borderRadius: 8,
-              background: 'rgba(15, 23, 42, 0.85)',
-              border: '1px solid rgba(129, 140, 248, 0.3)',
-              fontSize: 12,
-              color: '#e0e7ff',
-            }}
-          >
-            <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 2 }}>Latest Subtitle:</div>
-            {lastSubtitle}
-          </div>
-        )}
-      </div>
         </>
       )}
 
@@ -636,22 +593,22 @@ export const Popup: React.FC = () => {
           <div className="stat-label">Learning</div>
         </div>
         <div className="stat-tile">
-          <div className="stat-val due">{stats.due}</div>
-          <div className="stat-label">Due SRS</div>
+          <div className="stat-val mined">{stats.mined}</div>
+          <div className="stat-label">Mined</div>
         </div>
       </div>
 
       <div className="nav-grid">
-        <button className="btn" onClick={() => openDashboard('subtitles')}>
+        <button type="button" className="btn" onClick={() => openDashboard('subtitles')}>
           Subtitles Library
         </button>
-        <button className="btn" onClick={() => openDashboard('review')}>
-          Review ({stats.due})
+        <button type="button" className="btn" onClick={() => openDashboard('vocab')}>
+          Vocab &amp; Cards ({stats.mined})
         </button>
-        <button className="btn" onClick={() => openDashboard('vocab')}>
-          Vocabulary
+        <button type="button" className="btn" onClick={() => openDashboard('playground')}>
+          Playground
         </button>
-        <button className="btn" onClick={() => openDashboard('settings')}>
+        <button type="button" className="btn" onClick={() => openDashboard('settings')}>
           Settings &amp; Anki
         </button>
       </div>

@@ -7,7 +7,6 @@ import {
   type VocabEntry,
   type WordStatus,
 } from '../types';
-import { createInitialSrsState } from './srs';
 
 const STORAGE_KEYS = {
   SETTINGS: 'kotostream_settings',
@@ -16,6 +15,13 @@ const STORAGE_KEYS = {
   DICT_CACHE: 'kotostream_dict_cache',
   SUBTITLE_LIBRARY: 'kotostream_subtitle_library',
 } as const;
+
+const CARD_MEDIA_PREFIX = 'kotostream_card_media_';
+
+export interface CardMedia {
+  audioBase64?: string;
+  screenshotDataUrl?: string;
+}
 
 const MAX_DICT_CACHE_ENTRIES = 600;
 
@@ -41,6 +47,15 @@ async function storageSet(items: Record<string, unknown>): Promise<void> {
   if (!hasChromeStorage()) return;
   try {
     await chrome.storage.local.set(items);
+  } catch {
+    // Ignore when extension context has been invalidated after reload
+  }
+}
+
+async function storageRemove(keys: string | string[]): Promise<void> {
+  if (!hasChromeStorage() || !chrome.storage.local.remove) return;
+  try {
+    await chrome.storage.local.remove(keys);
   } catch {
     // Ignore when extension context has been invalidated after reload
   }
@@ -207,22 +222,71 @@ export async function bulkImportVocabEntries(entries: BulkVocabEntry[]): Promise
   return { added, updated, persisted: true };
 }
 
+function cardMediaKey(cardId: string): string {
+  return `${CARD_MEDIA_PREFIX}${cardId}`;
+}
+
+function stripCardMedia(card: MinedCard): MinedCard {
+  const { audioBase64, screenshotDataUrl, ...meta } = card;
+  return {
+    ...meta,
+    hasAudio: Boolean(meta.hasAudio || audioBase64),
+    hasScreenshot: Boolean(meta.hasScreenshot || screenshotDataUrl),
+  };
+}
+
+export async function getCardMedia(cardId: string): Promise<CardMedia> {
+  return storageGet<CardMedia>(cardMediaKey(cardId), {});
+}
+
+export async function hydrateMinedCard(card: MinedCard): Promise<MinedCard> {
+  if (
+    (!card.hasAudio || card.audioBase64) &&
+    (!card.hasScreenshot || card.screenshotDataUrl)
+  ) {
+    return card;
+  }
+  const media = await getCardMedia(card.id);
+  return {
+    ...card,
+    audioBase64: card.audioBase64 ?? media.audioBase64,
+    screenshotDataUrl: card.screenshotDataUrl ?? media.screenshotDataUrl,
+  };
+}
+
 export async function getMinedCards(): Promise<MinedCard[]> {
-  return storageGet<MinedCard[]>(STORAGE_KEYS.CARDS, []);
+  const cards = await storageGet<MinedCard[]>(STORAGE_KEYS.CARDS, []);
+  return cards.map((card) => ({
+    ...card,
+    hasAudio: Boolean(card.hasAudio || card.audioBase64),
+    hasScreenshot: Boolean(card.hasScreenshot || card.screenshotDataUrl),
+  }));
 }
 
 export async function addMinedCard(
-  cardInput: Omit<MinedCard, 'id' | 'createdAt' | 'srs'>
+  cardInput: Omit<MinedCard, 'id' | 'createdAt'>
 ): Promise<MinedCard> {
-  const cards = await getMinedCards();
+  const cards = await storageGet<MinedCard[]>(STORAGE_KEYS.CARDS, []);
   const now = Date.now();
   const card: MinedCard = {
     ...cardInput,
+    hasAudio: Boolean(cardInput.hasAudio || cardInput.audioBase64),
+    hasScreenshot: Boolean(cardInput.hasScreenshot || cardInput.screenshotDataUrl),
     id: `card_${now}_${Math.random().toString(36).slice(2, 7)}`,
     createdAt: now,
-    srs: createInitialSrsState(now),
   };
-  cards.unshift(card);
+
+  // Store full-quality media (48kHz stereo WAV / WebP screenshot) under a dedicated per-card key
+  // so listing/counting/updating kotostream_cards stays fast and lightweight.
+  if (card.audioBase64 || card.screenshotDataUrl) {
+    const media: CardMedia = {};
+    if (card.audioBase64) media.audioBase64 = card.audioBase64;
+    if (card.screenshotDataUrl) media.screenshotDataUrl = card.screenshotDataUrl;
+    await storageSet({ [cardMediaKey(card.id)]: media });
+  }
+
+  // Strip heavy media blobs from the index array (also migrates any legacy inline media entries on write)
+  cards.unshift(stripCardMedia(card));
   await storageSet({ [STORAGE_KEYS.CARDS]: cards });
 
   // Also ensure the word is marked as learning in vocab tracker
@@ -235,18 +299,29 @@ export async function addMinedCard(
 }
 
 export async function updateMinedCard(updated: MinedCard): Promise<void> {
-  const cards = await getMinedCards();
+  const cards = await storageGet<MinedCard[]>(STORAGE_KEYS.CARDS, []);
   const idx = cards.findIndex((c) => c.id === updated.id);
   if (idx >= 0) {
-    cards[idx] = updated;
+    if (updated.audioBase64 || updated.screenshotDataUrl) {
+      const existingMedia = await getCardMedia(updated.id);
+      const nextMedia: CardMedia = {
+        audioBase64: updated.audioBase64 ?? existingMedia.audioBase64,
+        screenshotDataUrl: updated.screenshotDataUrl ?? existingMedia.screenshotDataUrl,
+      };
+      await storageSet({ [cardMediaKey(updated.id)]: nextMedia });
+    }
+    cards[idx] = stripCardMedia(updated);
     await storageSet({ [STORAGE_KEYS.CARDS]: cards });
   }
 }
 
 export async function deleteMinedCard(cardId: string): Promise<void> {
-  const cards = await getMinedCards();
+  const cards = await storageGet<MinedCard[]>(STORAGE_KEYS.CARDS, []);
   const filtered = cards.filter((c) => c.id !== cardId);
-  await storageSet({ [STORAGE_KEYS.CARDS]: filtered });
+  await Promise.all([
+    storageSet({ [STORAGE_KEYS.CARDS]: filtered }),
+    storageRemove(cardMediaKey(cardId)),
+  ]);
 }
 
 export async function getDictCache(): Promise<Record<string, DictionaryEntry>> {

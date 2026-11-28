@@ -2,9 +2,7 @@ import overlayCss from './overlay.css?raw';
 import type {
   AppSettings,
   CaptureState,
-  CardType,
   DictionaryEntry,
-  ExtensionMessage,
   FuriganaMode,
   SavedSubtitleTrack,
   ScreenshotFormat,
@@ -25,82 +23,21 @@ import {
   bindSubtitleTrackToUrl,
   findSubtitleTrackForUrl,
   getSubtitleLibrary,
+  saveSettings,
   saveSubtitleTrack,
   setWordStatus,
+  updateMinedCard,
   updateSubtitleTrackOffset,
 } from '../../core/storage';
-import { buildAnkiFieldPreview, exportCardToAnki } from '../../core/anki';
+import { exportCardToAnki } from '../../core/anki';
 import { captureCleanVideoScreenshot } from '../screenshot';
 import type { SiteAdapter } from '../adapters/base';
-
-interface CardDraft {
-  word: string;
-  surfaceWord: string;
-  reading: string;
-  meaning: string;
-  sentence: string;
-  translation: string;
-  notes: string;
-  cardType: CardType;
-  sourceTitle: string;
-  sourceUrl: string;
-  screenshotDataUrl?: string;
-  screenshotFormat?: ScreenshotFormat;
-  screenshotMeta?: string;
-  audioBase64?: string;
-  audioMimeType?: string;
-  audioDurationSec?: number;
-  translating: boolean;
-  capturingShot: boolean;
-}
+import { escapeHtml, formatSeconds, playBase64Audio, safeSendMessage } from './utils';
+import { ClipCaptureController } from './ClipCaptureController';
+import { CardCreatorModal, type CardDraft } from './CardCreatorModal';
 
 /** How many transcript lines to render above/below the active line in the sidebar browser. */
 const BROWSER_WINDOW_LINES = 80;
-
-function safeSendMessage<T = unknown>(message: ExtensionMessage): Promise<T | undefined> {
-  if (typeof chrome === 'undefined' || !chrome.runtime?.id) {
-    return Promise.resolve(undefined);
-  }
-  try {
-    return chrome.runtime.sendMessage(message).catch(() => undefined) as Promise<T | undefined>;
-  } catch {
-    return Promise.resolve(undefined);
-  }
-}
-
-function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes.buffer;
-}
-
-/**
- * Plays a base64 audio clip using Web Audio API (immune to Amazon Prime / Netflix media-src CSP!).
- */
-async function playBase64Audio(base64: string, mimeType = 'audio/wav'): Promise<void> {
-  try {
-    const ctx = new AudioContext();
-    const arrayBuffer = base64ToArrayBuffer(base64);
-    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-    const source = ctx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(ctx.destination);
-    source.onended = () => {
-      void ctx.close().catch(() => {});
-    };
-    source.start(0);
-  } catch {
-    // Fallback to Blob URL Audio element
-    const blob = new Blob([base64ToArrayBuffer(base64)], { type: mimeType });
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    audio.onended = () => URL.revokeObjectURL(url);
-    await audio.play().catch(() => {});
-  }
-}
 
 export class OverlayManager {
   private host: HTMLDivElement;
@@ -108,6 +45,7 @@ export class OverlayManager {
   private adapter: SiteAdapter;
   private video: HTMLVideoElement | null = null;
   private mountedContainer: HTMLElement | null = null;
+  private docListenersAttached = false;
 
   private settings: AppSettings;
   private vocabMap: Record<string, VocabEntry> = {};
@@ -140,11 +78,12 @@ export class OverlayManager {
   private activeCuesForCurrentSub: SubtitleLine[] = [];
   private activeRowRange: { startSec: number; endSec: number } | null = null;
   private lastVideoSyncSentAt = 0;
-  private isCapturingClip = false;
-  private activeEntry: DictionaryEntry | null = null;
   private pausedByOverlay = false;
   private hoverCloseTimer: number | null = null;
   private toastTimer: number | null = null;
+
+  private clipCapture: ClipCaptureController;
+  private cardModal!: CardCreatorModal;
 
   // DOM refs inside Shadow DOM
   private toolbarEl!: HTMLDivElement;
@@ -161,12 +100,18 @@ export class OverlayManager {
   private toastEl!: HTMLDivElement;
   private fileInputEl!: HTMLInputElement;
   private modalBackdropEl!: HTMLDivElement;
-  private cardDraft: CardDraft | null = null;
 
   constructor(adapter: SiteAdapter, settings: AppSettings, vocabMap: Record<string, VocabEntry>) {
     this.adapter = adapter;
     this.settings = settings;
     this.vocabMap = vocabMap;
+
+    this.clipCapture = new ClipCaptureController({
+      getVideo: () => this.video,
+      getCaptureState: () => this.captureState,
+      emitVideoTimeSync: (force, seeked) => this.emitVideoTimeSync(force, seeked),
+      showToast: (msg) => this.showToast(msg),
+    });
 
     this.host = document.createElement('div');
     this.host.id = 'kotostream-overlay-host';
@@ -185,7 +130,7 @@ export class OverlayManager {
     this.toolbarEl.className = 'ks-toolbar';
     this.toolbarEl.innerHTML = `
       <span class="ks-brand"><span class="ks-dot"></span>KotoStream</span>
-      <button class="ks-btn ks-btn-primary" data-action="toggle-capture">Start AI Subs</button>
+      <button class="ks-btn ks-btn-primary" data-action="toggle-capture" title="Silently pre-scan episode at 4x to generate Japanese subtitles">AI Pre-Scan</button>
       <button class="ks-btn" data-action="toggle-furigana" title="Cycle Furigana mode">振り仮名</button>
       <button class="ks-btn" data-action="toggle-library" title="Saved Subtitle Library &amp; Jimaku">Library</button>
       <button class="ks-btn" data-action="load-file" title="Load .srt, .vtt, or .ass Japanese subtitles">Load Sub</button>
@@ -195,7 +140,7 @@ export class OverlayManager {
         <button class="ks-btn" data-action="sync-plus" title="Delay subtitles by 0.5s">+0.5s</button>
       </span>
       <button class="ks-btn" data-action="toggle-sidebar" title="Subtitle browser — browse past &amp; upcoming lines">Subtitles</button>
-      <button class="ks-btn" data-action="open-settings" title="Settings &amp; Dashboard">⚙</button>
+      <button class="ks-btn" data-action="open-settings" title="Settings &amp; Anki">⚙</button>
       <span class="ks-status-pill"></span>
     `;
     this.shadow.appendChild(this.toolbarEl);
@@ -234,7 +179,7 @@ export class OverlayManager {
         <span>Subtitles</span>
         <div class="ks-sidebar-header-actions">
           <button class="ks-btn ks-btn-icon" data-action="follow-live" title="Jump back to the current line">⤓</button>
-          <button class="ks-btn ks-btn-icon" data-action="close-sidebar">✕</button>
+          <button class="ks-btn ks-btn-icon" data-action="close-sidebar" aria-label="Close sidebar">✕</button>
         </div>
       </div>
       <div class="ks-sidebar-list"></div>
@@ -253,8 +198,42 @@ export class OverlayManager {
     this.modalBackdropEl.className = 'ks-modal-backdrop';
     this.shadow.appendChild(this.modalBackdropEl);
 
+    this.cardModal = new CardCreatorModal(this.modalBackdropEl, {
+      getAnkiSettings: () => this.settings.anki,
+      fetchTranslation: (sentence, targetWord) => this.fetchSentenceTranslation(sentence, targetWord),
+      captureScreenshot: () => this.captureVideoFrame(),
+      commitDraft: (draft) => this.commitCardDraft(draft),
+      showToast: (msg) => this.showToast(msg),
+    });
+
     this.bindEvents();
     this.updateFuriganaLabel();
+  }
+
+  private handleDocumentClick = (e: MouseEvent) => {
+    if (!this.host.contains(e.target as Node)) {
+      this.closePopover();
+    }
+  };
+
+  private handleDocumentKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Escape' && !this.cardModal.isOpen && this.popoverEl.classList.contains('ks-open')) {
+      this.closePopover();
+    }
+  };
+
+  private attachDocumentListeners() {
+    if (this.docListenersAttached) return;
+    this.docListenersAttached = true;
+    document.addEventListener('click', this.handleDocumentClick);
+    document.addEventListener('keydown', this.handleDocumentKeyDown);
+  }
+
+  private detachDocumentListeners() {
+    if (!this.docListenersAttached) return;
+    this.docListenersAttached = false;
+    document.removeEventListener('click', this.handleDocumentClick);
+    document.removeEventListener('keydown', this.handleDocumentKeyDown);
   }
 
   private bindEvents() {
@@ -268,7 +247,7 @@ export class OverlayManager {
           void this.toggleLiveCapture();
           break;
         case 'toggle-furigana':
-          this.cycleFuriganaMode();
+          void this.cycleFuriganaMode();
           break;
         case 'toggle-library':
           if (this.sidebarEl.classList.contains('ks-open') && this.sidebarMode === 'library') {
@@ -301,7 +280,7 @@ export class OverlayManager {
           this.fileInputEl.click();
           break;
         case 'open-settings':
-          void safeSendMessage({ type: 'OPEN_DASHBOARD', tab: 'subtitles' });
+          void safeSendMessage({ type: 'OPEN_DASHBOARD', tab: 'settings' });
           break;
       }
     });
@@ -329,7 +308,6 @@ export class OverlayManager {
       if (item?.dataset.subId) {
         const cue = this.getBrowserLines().find((s) => s.id === item.dataset.subId);
         if (cue) {
-          // Seek the video to this line (Migaku-style transcript navigation)
           if (cue.videoTimeSec !== undefined && this.video) {
             this.browserActiveIds = new Set([cue.id]);
             this.browserFollowLive = true;
@@ -342,7 +320,6 @@ export class OverlayManager {
       }
     });
 
-    // Manual scrolling pauses live-follow so the user can freely browse past & upcoming lines
     const userScrollHandler = () => this.setBrowserFollow(false);
     this.sidebarListEl.addEventListener('wheel', userScrollHandler, { passive: true });
     this.sidebarListEl.addEventListener('touchmove', userScrollHandler, { passive: true });
@@ -370,7 +347,6 @@ export class OverlayManager {
       }
     });
 
-    // Keep popover alive while mouse is over it
     this.popoverEl.addEventListener('mouseenter', () => {
       if (this.hoverCloseTimer) {
         clearTimeout(this.hoverCloseTimer);
@@ -385,17 +361,11 @@ export class OverlayManager {
     this.subtitleBoxEl.addEventListener('mouseleave', () => {
       this.schedulePopoverClose();
     });
-
-    // Close popover on outside click
-    document.addEventListener('click', (e) => {
-      if (!this.host.contains(e.target as Node)) {
-        this.closePopover();
-      }
-    });
   }
 
   public ensureMounted() {
     if (!this.settings.enabled) return;
+    this.attachDocumentListeners();
     this.host.style.display = '';
     const container =
       document.fullscreenElement instanceof HTMLElement
@@ -413,7 +383,6 @@ export class OverlayManager {
     this.video = video;
     this.ensureMounted();
 
-    // Bind video listeners for .srt/.vtt/.ass playback sync & timestamped sentence audio buffer
     video.removeEventListener('timeupdate', this.handleVideoTimeUpdate);
     video.removeEventListener('play', this.handleVideoStateSync);
     video.removeEventListener('playing', this.handleVideoStateSync);
@@ -429,7 +398,6 @@ export class OverlayManager {
     video.addEventListener('ratechange', this.handleVideoStateSync);
     this.emitVideoTimeSync(true);
 
-    // Auto-load any saved subtitle track bound to this episode URL
     if (this.lastAutoLoadedUrl !== window.location.href) {
       this.lastAutoLoadedUrl = window.location.href;
       void this.tryAutoLoadSavedTrack();
@@ -437,6 +405,7 @@ export class OverlayManager {
   }
 
   public unmount() {
+    this.detachDocumentListeners();
     if (this.hoverCloseTimer) {
       clearTimeout(this.hoverCloseTimer);
       this.hoverCloseTimer = null;
@@ -446,9 +415,7 @@ export class OverlayManager {
       this.toastTimer = null;
     }
     this.closePopover();
-    this.cardDraft = null;
-    this.modalBackdropEl.classList.remove('ks-open');
-    this.modalBackdropEl.innerHTML = '';
+    this.cardModal.close();
     this.sidebarEl.classList.remove('ks-open');
     this.toastEl.classList.remove('ks-visible');
     this.subtitleBoxEl.classList.add('ks-empty');
@@ -465,7 +432,6 @@ export class OverlayManager {
     if (this.host.isConnected) {
       this.host.remove();
     }
-    // Also remove any orphaned KotoStream hosts (e.g. left over from before an extension reload)
     document.querySelectorAll('#kotostream-overlay-host').forEach((el) => el.remove());
     this.mountedContainer = null;
   }
@@ -539,7 +505,7 @@ export class OverlayManager {
     if (!isBuffering) return;
 
     const now = Date.now();
-    const minIntervalMs = this.isCapturingClip ? 100 : 350;
+    const minIntervalMs = this.clipCapture.isCapturingClip ? 100 : 350;
     if (!force && now - this.lastVideoSyncSentAt < minIntervalMs) return;
     this.lastVideoSyncSentAt = now;
 
@@ -558,7 +524,7 @@ export class OverlayManager {
   };
 
   private handleVideoSeeked = () => {
-    this.emitVideoTimeSync(true, !this.isCapturingClip);
+    this.emitVideoTimeSync(true, !this.clipCapture.isCapturingClip);
   };
 
   private handleVideoTimeUpdate = () => {
@@ -567,7 +533,7 @@ export class OverlayManager {
   };
 
   private syncFileSubtitleToVideo() {
-    if (this.isCapturingClip) return;
+    if (this.clipCapture.isCapturingClip) return;
     if (!this.video || this.loadedFileSubtitles.length === 0) return;
     const activeCues = findActiveSubtitlesAtTime(
       this.loadedFileSubtitles,
@@ -592,13 +558,11 @@ export class OverlayManager {
         };
         this.setSubtitle(combinedLine, false);
 
-        // Update the Migaku-style subtitle browser's active highlight + auto-follow
         this.browserActiveIds = new Set(activeCues.map((c) => c.id));
         if (this.sidebarEl.classList.contains('ks-open') && this.sidebarMode === 'browser') {
           this.updateBrowserActive();
         }
 
-        // Pre-tokenize the next 3 upcoming cues in the background via MeCab so they appear in 0ms!
         const lastActive = activeCues[activeCues.length - 1];
         const idx = this.loadedFileSubtitles.findIndex((c) => c.id === lastActive.id);
         if (idx >= 0) {
@@ -622,6 +586,10 @@ export class OverlayManager {
 
   public updateSettings(settings: AppSettings) {
     const wasEnabled = this.settings.enabled;
+    const prevFurigana = this.settings.overlay.furiganaMode;
+    const prevHighlightUnknown = this.settings.overlay.highlightUnknown;
+    const prevHighlightLearning = this.settings.overlay.highlightLearning;
+
     this.settings = settings;
     if (!settings.enabled) {
       this.unmount();
@@ -633,14 +601,21 @@ export class OverlayManager {
       this.mount(this.video);
     }
     this.renderCurrentSubtitle();
+
+    if (
+      this.sidebarEl.classList.contains('ks-open') &&
+      this.sidebarMode === 'browser' &&
+      (prevFurigana !== settings.overlay.furiganaMode ||
+        prevHighlightUnknown !== settings.overlay.highlightUnknown ||
+        prevHighlightLearning !== settings.overlay.highlightLearning)
+    ) {
+      this.renderSubtitleBrowser();
+    }
   }
 
   public updateVocabMap(vocabMap: Record<string, VocabEntry>) {
     this.vocabMap = vocabMap;
     this.renderCurrentSubtitle();
-    // Dashboard/popup imports (e.g. a Migaku word list) should recolor panel lines immediately
-    // too — refreshBrowserLineStatuses is a no-op when the panel is closed and only re-renders
-    // lines whose token statuses actually changed.
     this.refreshBrowserLineStatuses();
   }
 
@@ -666,7 +641,7 @@ export class OverlayManager {
         state.status === 'prescanning' ? 'Cancel AI Scan' : 'Stop AI Subs';
       this.toggleCaptureBtn.className = 'ks-btn ks-btn-danger';
     } else {
-      this.toggleCaptureBtn.textContent = 'Start AI Subs';
+      this.toggleCaptureBtn.textContent = 'AI Pre-Scan';
       this.toggleCaptureBtn.className = 'ks-btn ks-btn-primary';
     }
 
@@ -716,7 +691,6 @@ export class OverlayManager {
     };
 
     if (appendToHistory && withTime.source === 'live-stt') {
-      // Interim streaming results (Deepgram WebSocket) preview smoothly against the last committed line
       if (withTime.isInterim) {
         const { subtitle: previewSub } = mergeLiveSubtitle(this.committedSubtitle, withTime, {
           resetPauseMs: this.settings.stt.sentenceResetPauseMs ?? 2200,
@@ -763,11 +737,6 @@ export class OverlayManager {
     this.renderCurrentSubtitle();
   }
 
-  /**
-   * Renders a token's visible text with proper per-kanji-run ruby: furigana sits only
-   * above the KANJI segments of the word (食[た]べた), never stretched across its kana
-   * parts. Words that cannot be aligned fall back to one full-width ruby.
-   */
   private appendTokenText(span: HTMLElement, token: Token, furiganaMode: FuriganaMode) {
     const showFurigana =
       token.hasKanji &&
@@ -848,8 +817,6 @@ export class OverlayManager {
         if (token.isWord) {
           span.classList.add('ks-word');
         }
-        // While the popover is open on a word from THIS cue's row, keep it selected after
-        // status-change re-renders so the user never loses track of the target word.
         if (
           this.popoverEl.classList.contains('ks-open') &&
           this.activeToken &&
@@ -906,7 +873,6 @@ export class OverlayManager {
       this.subtitleBoxEl.appendChild(rowEl);
     });
 
-    // Silently prefetch dictionary entries for words in this subtitle so hovering is instant (0ms)
     this.prefetchSubtitleWords(allTokens);
   }
 
@@ -937,7 +903,6 @@ export class OverlayManager {
         ) {
           this.renderCurrentSubtitle();
         }
-        // Patch the sidebar browser line in place so its tokens upgrade instantly
         if (browserPatch && browserPatch.container.isConnected) {
           const cue = this.getBrowserLines().find((c) => c.id === browserPatch.cueId);
           if (cue) {
@@ -949,7 +914,6 @@ export class OverlayManager {
   }
 
   private prefetchSubtitleWords(tokens: Token[]) {
-    // 1. Verify adjacent compounds & 3-token expressions (e.g. 気をそらす) against JMdict/Jisho (exactOnly: true)
     const compoundCandidates = findCandidateCompounds(tokens)
       .filter((c) => !this.checkedCompounds.has(c) && !this.verifiedCompounds.has(c))
       .slice(0, 8);
@@ -982,7 +946,6 @@ export class OverlayManager {
             ) {
               this.renderCurrentSubtitle();
             }
-            // Merge the expression inside the sidebar browser lines too (e.g. 気をそらす)
             if (this.sidebarEl.classList.contains('ks-open') && this.sidebarMode === 'browser') {
               this.patchBrowserLines(compound);
             }
@@ -991,7 +954,6 @@ export class OverlayManager {
       }
     }
 
-    // 2. Prefetch regular content words so hovering is instant (0ms)
     const toFetch = tokens
       .filter((t) => t.isWord && t.status !== 'ignored')
       .filter((t) => !this.entryCache.has(t.baseForm) && !lookupLocal(t.baseForm))
@@ -1024,9 +986,6 @@ export class OverlayManager {
       Math.min(window.innerWidth - popWidth - 12, tokenRect.left + tokenRect.width / 2 - popWidth / 2)
     );
 
-    // Anchor the popover's BOTTOM edge cleanly above the entire subtitle box so growing height
-    // expands upward and NEVER covers the subtitles!
-    // For sidebar browser words, anchor above the token itself so the panel stays readable.
     const anchorTop = fromPanel ? tokenRect.top : Math.min(tokenRect.top, subRect.top);
     const bottomPx = Math.max(12, window.innerHeight - anchorTop + 12);
     const maxHeightPx = Math.max(180, anchorTop - 24);
@@ -1046,14 +1005,12 @@ export class OverlayManager {
       this.pausedByOverlay = true;
     }
 
-    // Highlight selected token (across the subtitle box AND the sidebar browser)
     this.shadow.querySelectorAll('.ks-selected').forEach((el) => el.classList.remove('ks-selected'));
     anchorEl.classList.add('ks-selected');
 
     this.positionPopoverAboveSubtitles(anchorEl, fromPanel);
     this.popoverEl.classList.add('ks-open');
 
-    // 1. Instant 0ms check: in-memory prefetched cache or local core dictionary
     const cached =
       this.entryCache.get(token.baseForm) ??
       this.entryCache.get(token.surface) ??
@@ -1061,13 +1018,10 @@ export class OverlayManager {
       lookupLocal(token.surface);
 
     if (cached) {
-      this.activeEntry = cached;
       this.renderPopoverContent(token, cached, false);
       return;
     }
 
-    // 2. Not cached yet -> show compact loading state and fetch via background worker
-    this.activeEntry = null;
     this.renderPopoverContent(token, null, true);
 
     try {
@@ -1080,7 +1034,6 @@ export class OverlayManager {
       if (this.activeToken?.surface !== token.surface) return;
 
       const entry = response?.entry ?? null;
-      this.activeEntry = entry;
       if (entry) {
         this.entryCache.set(token.baseForm, entry);
         if (entry.reading) {
@@ -1143,9 +1096,10 @@ export class OverlayManager {
         <button class="ks-status-btn ${currentStatus === 'unknown' ? 'active-unknown' : ''}" data-set-status="unknown">Unknown</button>
         <button class="ks-status-btn ${currentStatus === 'learning' ? 'active-learning' : ''}" data-set-status="learning">Learning</button>
         <button class="ks-status-btn ${currentStatus === 'known' ? 'active-known' : ''}" data-set-status="known">Known</button>
+        <button class="ks-status-btn ${currentStatus === 'ignored' ? 'active-ignored' : ''}" data-set-status="ignored">Ignored</button>
       </div>
       <div class="ks-pop-actions">
-        <button class="ks-btn ks-btn-primary" data-mine="srs">${this.settings.anki.enabled ? 'Mine Card + Anki' : 'Mine Flashcard'}</button>
+        <button class="ks-btn ks-btn-primary" data-mine="card">${this.settings.anki.enabled ? 'Mine Card + Anki' : 'Mine Card'}</button>
       </div>
     `;
 
@@ -1156,13 +1110,11 @@ export class OverlayManager {
         const meaning = entry?.senses[0]?.definitions.slice(0, 3).join('; ') ?? '';
         const updated = await setWordStatus(word, status, { reading, meaning });
         this.vocabMap[word] = updated;
-        // Also sync an existing kanji/kana alias (e.g. できる <-> 出来る) if already tracked
         if (matchedVocab && matchedVocab.baseForm !== word) {
           const aliasUpdated = await setWordStatus(matchedVocab.baseForm, status, { reading, meaning });
           this.vocabMap[matchedVocab.baseForm] = aliasUpdated;
         }
         this.renderCurrentSubtitle();
-        // Live-update underlines & furigana in every visible sidebar browser line too!
         this.refreshBrowserLineStatuses();
         this.renderPopoverContent({ ...token, status }, entry, false);
         this.showToast(`Marked “${word}” as ${status}`);
@@ -1176,7 +1128,7 @@ export class OverlayManager {
       popAudioBtn.disabled = true;
       try {
         const range = this.getActiveAudioRange();
-        const audioRes = await this.fetchSentenceAudio(range, true);
+        const audioRes = await this.clipCapture.fetchSentenceAudio(range, true);
         if (audioRes?.audioBase64) {
           await playBase64Audio(audioRes.audioBase64, audioRes.mimeType);
         } else {
@@ -1187,14 +1139,14 @@ export class OverlayManager {
       }
     });
 
-    const mineBtn = this.popoverEl.querySelector<HTMLButtonElement>('[data-mine="srs"]');
+    const mineBtn = this.popoverEl.querySelector<HTMLButtonElement>('[data-mine="card"]');
     mineBtn?.addEventListener('click', async (e) => {
       e.stopPropagation();
       mineBtn.disabled = true;
       mineBtn.textContent = this.settings.anki.openPreviewBeforeSaving ? 'Preparing…' : 'Mining…';
       await this.startMineWorkflow(token.surface, word, reading, entry);
       mineBtn.disabled = false;
-      mineBtn.textContent = this.settings.anki.enabled ? 'Mine Card + Anki' : 'Mine Flashcard';
+      mineBtn.textContent = this.settings.anki.enabled ? 'Mine Card + Anki' : 'Mine Card';
     });
   }
 
@@ -1315,289 +1267,12 @@ export class OverlayManager {
     return { durationMs: 4500 };
   }
 
-  private async fetchSentenceAudio(
-    range: { startTimeSec?: number; endTimeSec?: number; durationMs: number },
-    showProgressToast = true
-  ): Promise<{ audioBase64?: string; mimeType?: string; durationSec?: number } | undefined> {
-    type RecentAudioResp = {
-      audioBase64?: string;
-      mimeType?: string;
-      durationSec?: number;
-      coverage?: {
-        hasStart: boolean;
-        hasEnd: boolean;
-        coveredStartSec: number | null;
-        coveredEndSec: number | null;
-      };
-    };
-
-    const initial = await safeSendMessage<RecentAudioResp>({
-      type: 'REQUEST_RECENT_AUDIO',
-      durationMs: range.durationMs,
-      startTimeSec: range.startTimeSec,
-      endTimeSec: range.endTimeSec,
-    });
-
-    const isBuffering =
-      this.captureState.status === 'buffering' ||
-      this.captureState.status === 'listening' ||
-      this.captureState.status === 'transcribing';
-
-    const rangeKnown =
-      range.startTimeSec !== undefined &&
-      range.endTimeSec !== undefined &&
-      range.endTimeSec > range.startTimeSec;
-
-    // Audio is only trustworthy for a cue range when the ring buffer actually covers BOTH the
-    // start and the end of the sentence. After a backward seek (e.g. clicking an older panel
-    // line) the buffer no longer spans that window — re-capture it instead of using whatever
-    // happened to be playing near the playhead!
-    const initialMatchesRange =
-      !rangeKnown || (Boolean(initial?.audioBase64) && Boolean(initial?.coverage?.hasStart && initial?.coverage?.hasEnd));
-
-    // Instant 0ms return if buffer already covers the full sentence (or no cue timestamps exist)
-    if (!isBuffering || !this.video || !rangeKnown || initialMatchesRange) {
-      return initialMatchesRange ? initial : undefined;
-    }
-
-    if (this.isCapturingClip) {
-      return initialMatchesRange ? initial : undefined;
-    }
-
-    // User paused mid-sentence (before listening to the end) or jumped to a cue without
-    // playing the start: silently capture the missing audio while speakers are muted!
-    const captured = await this.captureMissingSentenceAudio(
-      range.startTimeSec!,
-      range.endTimeSec!,
-      range.durationMs,
-      initial?.coverage,
-      showProgressToast
-    );
-    // If the re-capture failed, attach NO audio rather than a wrong-position clip.
-    return captured?.audioBase64 ? captured : initialMatchesRange ? initial : undefined;
-  }
-
-  private async captureMissingSentenceAudio(
-    startTimeSec: number,
-    endTimeSec: number,
-    durationMs: number,
-    coverage?: {
-      hasStart: boolean;
-      hasEnd: boolean;
-      coveredStartSec: number | null;
-      coveredEndSec: number | null;
-    },
-    showProgressToast = true
-  ): Promise<{ audioBase64?: string; mimeType?: string; durationSec?: number } | undefined> {
-    const video = this.video;
-    if (!video) return undefined;
-
-    const wasPaused = video.paused;
-    const savedTime = video.currentTime;
-    const savedRate = video.playbackRate || 1;
-    const savedPreservesPitch = video.preservesPitch ?? true;
-
-    const maxDuration =
-      Number.isFinite(video.duration) && video.duration > 0 ? video.duration : endTimeSec + 0.35;
-    const targetEndSec = Math.min(maxDuration, endTimeSec + 0.3);
-
-    // If the ring buffer already has the start of the sentence up to ~savedTime,
-    // just continue silently from savedTime (zero backward seek, zero rebuffering!).
-    const canContinueWithoutSeek =
-      Boolean(coverage?.hasStart) &&
-      coverage?.coveredEndSec !== null &&
-      coverage?.coveredEndSec !== undefined &&
-      savedTime >= startTimeSec - 0.15 &&
-      savedTime <= targetEndSec &&
-      coverage.coveredEndSec >= savedTime - 0.65;
-
-    const needSeek = !canContinueWithoutSeek;
-    const captureStartSec = needSeek ? Math.max(0, startTimeSec - 0.25) : savedTime;
-    const spanSec = Math.max(0.25, targetEndSec - captureStartSec);
-
-    // Always capture at native 1x speed so the 48 kHz Stereo PCM matches the original audio bit-for-bit!
-    const desiredRate = 1;
-
-    this.isCapturingClip = true;
-    if (showProgressToast) {
-      this.showToast('Capturing full sentence audio…');
-    }
-
-    let result: { audioBase64?: string; mimeType?: string; durationSec?: number } | undefined;
-
-    try {
-      // Mute speakers FIRST before seeking or playing so the user hears zero sound
-      await safeSendMessage({
-        type: 'SET_CLIP_CAPTURE_MODE',
-        active: true,
-        playbackRate: desiredRate,
-        unpitched: desiredRate > 1,
-        startNewSegment: needSeek,
-      });
-
-      if (needSeek) {
-        // Verify the seek actually LANDED before playing: streaming/DRM players can stall or
-        // silently ignore a fast backward seek (e.g. right after a panel-line jump). Recording
-        // from the wrong position would put a different line's audio on the card, so give the
-        // seek up to 3s and abort cleanly when it never settles.
-        const landed = await new Promise<boolean>((resolve) => {
-          let settled = false;
-          const nearTarget = () => Math.abs(video.currentTime - captureStartSec) < 0.9;
-          const finish = (ok: boolean) => {
-            if (settled) return;
-            settled = true;
-            video.removeEventListener('seeked', onSeeked);
-            window.clearInterval(pollId);
-            window.clearTimeout(timeoutId);
-            resolve(ok);
-          };
-          const onSeeked = () => finish(nearTarget());
-          const pollId = window.setInterval(() => {
-            if (nearTarget()) finish(true);
-          }, 120);
-          const timeoutId = window.setTimeout(() => finish(false), 3000);
-          video.addEventListener('seeked', onSeeked);
-          try {
-            video.currentTime = captureStartSec;
-          } catch {
-            finish(false);
-          }
-        });
-
-        if (!landed) {
-          if (showProgressToast) {
-            this.showToast('Could not jump back to the sentence start — audio skipped.');
-          }
-          // The finally block restores playback, position, and speaker volume.
-          return undefined;
-        }
-      }
-
-      if (desiredRate > 1) {
-        try {
-          video.preservesPitch = false;
-          video.playbackRate = desiredRate;
-        } catch {
-          // Player refused rate change; fall back to 1x seamlessly
-        }
-      } else if (video.playbackRate !== 1) {
-        try {
-          video.playbackRate = 1;
-        } catch {
-          // ignore
-        }
-      }
-
-      const actualRate = video.playbackRate || 1;
-      const unpitched = actualRate > 1.05 && video.preservesPitch === false;
-
-      if (Math.abs(actualRate - desiredRate) > 0.05 || unpitched !== (desiredRate > 1)) {
-        await safeSendMessage({
-          type: 'SET_CLIP_CAPTURE_MODE',
-          active: true,
-          playbackRate: actualRate,
-          unpitched,
-          startNewSegment: false,
-        });
-      }
-
-      this.emitVideoTimeSync(true, needSeek);
-
-      try {
-        await video.play();
-      } catch {
-        return undefined;
-      }
-
-      this.emitVideoTimeSync(true, false);
-
-      const timeoutMs = Math.min(12000, Math.max(3500, (spanSec / actualRate) * 1000 + 2500));
-
-      await new Promise<void>((resolve) => {
-        let settled = false;
-        const finish = () => {
-          if (settled) return;
-          settled = true;
-          clearInterval(pollId);
-          clearTimeout(timeoutId);
-          video.removeEventListener('timeupdate', check);
-          video.removeEventListener('ended', finish);
-          resolve();
-        };
-        const check = () => {
-          this.emitVideoTimeSync(false, false);
-          if (video.currentTime >= targetEndSec || video.ended) {
-            finish();
-          }
-        };
-        video.addEventListener('timeupdate', check);
-        video.addEventListener('ended', finish, { once: true });
-        const pollId = window.setInterval(check, 40);
-        const timeoutId = window.setTimeout(finish, timeoutMs);
-      });
-
-      // Pause at targetEndSec and wait ~180ms so Chrome's audio pipeline tail flushes into audioRing
-      video.pause();
-      this.emitVideoTimeSync(true, false);
-      await new Promise<void>((r) => setTimeout(r, 180));
-
-      const post = await safeSendMessage<{
-        audioBase64?: string;
-        mimeType?: string;
-        durationSec?: number;
-        coverage?: { hasStart: boolean; hasEnd: boolean };
-      }>({
-        type: 'REQUEST_RECENT_AUDIO',
-        durationMs,
-        startTimeSec,
-        endTimeSec,
-      });
-
-      // Accept only audio that genuinely spans the sentence. If coverage is still incomplete
-      // the capture never really covered the cue (e.g. the player fought the seek), and
-      // attaching it would put a different line's audio on the card.
-      if (post?.audioBase64 && post.coverage?.hasStart && post.coverage?.hasEnd) {
-        result = post;
-      }
-    } finally {
-      try {
-        video.playbackRate = savedRate;
-        video.preservesPitch = savedPreservesPitch;
-      } catch {
-        // ignore
-      }
-
-      if (Math.abs(video.currentTime - savedTime) > 0.05) {
-        try {
-          video.currentTime = savedTime;
-        } catch {
-          // ignore
-        }
-      }
-
-      await safeSendMessage({
-        type: 'SET_CLIP_CAPTURE_MODE',
-        active: false,
-      });
-
-      if (!wasPaused) {
-        void video.play().catch(() => {});
-      }
-
-      this.isCapturingClip = false;
-      this.emitVideoTimeSync(true, true);
-    }
-
-    return result;
-  }
-
   private async startMineWorkflow(
     surfaceWord: string,
     word: string,
     reading: string,
     entry: DictionaryEntry | null
   ) {
-    // Pause video cleanly while capturing / previewing
     if (this.video && !this.video.paused) {
       this.video.pause();
       this.pausedByOverlay = true;
@@ -1610,7 +1285,6 @@ export class OverlayManager {
         .map((s) => s.definitions.slice(0, 3).join('; '))
         .join('\n') || '(No definition)';
 
-    // Hide dictionary popover before capturing DRM-safe screenshot so the frame is 100% clean
     this.popoverEl.classList.remove('ks-open');
 
     const draft: CardDraft = {
@@ -1628,18 +1302,15 @@ export class OverlayManager {
       capturingShot: this.settings.anki.includeScreenshot,
     };
 
-    // Calculate exact episode timestamp window (adjusted by subtitleOffsetSec) for sentence audio extraction
     const range = this.getActiveAudioRange();
 
-    // Start translation in parallel, capture clean screenshot FIRST at the exact paused frame,
-    // then fetch (or silently finish capturing) the complete sentence audio from start to end!
     const translationPromise = draft.translating
       ? this.fetchSentenceTranslation(sentence, word)
       : Promise.resolve({ translation: '', providerUsed: 'off' });
 
     const shot = await this.captureVideoFrame();
     const audioRes = this.settings.anki.includeAudio
-      ? await this.fetchSentenceAudio(range, true)
+      ? await this.clipCapture.fetchSentenceAudio(range, true)
       : undefined;
 
     draft.screenshotDataUrl = shot.dataUrl;
@@ -1658,271 +1329,12 @@ export class OverlayManager {
       return;
     }
 
-    // Open Migaku-style Card Creator Modal immediately while translation resolves asynchronously
-    this.cardDraft = draft;
-    this.openCardCreatorModal();
+    this.cardModal.open(draft);
 
     if (draft.translating) {
       const transRes = await translationPromise;
-      if (this.cardDraft === draft) {
-        draft.translation = transRes.translation;
-        draft.translating = false;
-        const transInput = this.modalBackdropEl.querySelector<HTMLTextAreaElement>('[data-draft-field="translation"]');
-        if (transInput && !transInput.value.trim()) {
-          transInput.value = transRes.translation;
-        }
-        const transStatus = this.modalBackdropEl.querySelector<HTMLElement>('[data-trans-status]');
-        if (transStatus) {
-          const label =
-            transRes.providerUsed === 'openrouter'
-              ? 'Auto-translated (OpenRouter AI)'
-              : transRes.providerUsed === 'google_free'
-                ? 'Auto-translated (Google Translate)'
-                : 'Auto-translated';
-          transStatus.textContent = transRes.translation ? label : '';
-        }
-        this.refreshModalPreview();
-      }
+      this.cardModal.applyAsyncTranslation(draft, transRes.translation, transRes.providerUsed);
     }
-  }
-
-  private openCardCreatorModal() {
-    const d = this.cardDraft;
-    if (!d) return;
-
-    this.modalBackdropEl.innerHTML = `
-      <div class="ks-modal" role="dialog" aria-label="KotoStream Card Creator">
-        <div class="ks-modal-header">
-          <div class="ks-modal-title">
-            <span>Card Creator</span>
-            <span class="ks-badge">${escapeHtml(this.settings.anki.deckName)}</span>
-            <span class="ks-badge common">${escapeHtml(this.settings.anki.modelName)}</span>
-          </div>
-          <button class="ks-btn" data-modal-action="close">✕</button>
-        </div>
-
-        <div class="ks-modal-body">
-          <div class="ks-modal-editor">
-            <div class="ks-field-row">
-              <div class="ks-field">
-                <label>Target Word</label>
-                <input type="text" data-draft-field="word" value="${escapeHtml(d.word)}" />
-              </div>
-              <div class="ks-field">
-                <label>Reading (Furigana)</label>
-                <input type="text" data-draft-field="reading" value="${escapeHtml(d.reading)}" />
-              </div>
-            </div>
-
-            <div class="ks-field-row">
-              <div class="ks-field">
-                <label>Card Type</label>
-                <select data-draft-field="cardType">
-                  <option value="sentence" ${d.cardType === 'sentence' ? 'selected' : ''}>Sentence Card</option>
-                  <option value="word" ${d.cardType === 'word' ? 'selected' : ''}>Word Card</option>
-                  <option value="audio_sentence" ${d.cardType === 'audio_sentence' ? 'selected' : ''}>Audio Sentence Card</option>
-                </select>
-              </div>
-              <div class="ks-field">
-                <label>Source</label>
-                <input type="text" data-draft-field="sourceTitle" value="${escapeHtml(d.sourceTitle)}" />
-              </div>
-            </div>
-
-            <div class="ks-field">
-              <label>Sentence</label>
-              <textarea rows="2" data-draft-field="sentence">${escapeHtml(d.sentence)}</textarea>
-            </div>
-
-            <div class="ks-field">
-              <label>
-                <span>Sentence Translation <span data-trans-status style="color:#a5b4fc;font-weight:500;margin-left:6px">${d.translating ? 'Translating…' : ''}</span></span>
-                <button type="button" class="ks-btn" style="padding:2px 8px;font-size:11px" data-modal-action="retranslate">Re-translate</button>
-              </label>
-              <textarea rows="2" data-draft-field="translation" placeholder="English translation of the sentence…">${escapeHtml(d.translation)}</textarea>
-            </div>
-
-            <div class="ks-field">
-              <label>Definitions</label>
-              <textarea rows="3" data-draft-field="meaning">${escapeHtml(d.meaning)}</textarea>
-            </div>
-
-            <div class="ks-field">
-              <label>Notes (optional)</label>
-              <input type="text" data-draft-field="notes" value="${escapeHtml(d.notes)}" placeholder="Grammar nuance, context, etc." />
-            </div>
-
-            <div class="ks-shot-box">
-              ${
-                d.screenshotDataUrl
-                  ? `<img class="ks-shot-img" data-shot-img src="${d.screenshotDataUrl}" alt="Video screenshot" />`
-                  : `<div style="color:#94a3b8;font-size:12px;text-align:center;padding:18px" data-shot-empty>No screenshot captured</div>`
-              }
-              <div class="ks-shot-bar">
-                <span data-shot-meta>${escapeHtml(d.screenshotMeta || 'Clean video frame')}</span>
-                <div style="display:flex;gap:6px">
-                  <button type="button" class="ks-btn" style="padding:3px 9px;font-size:11px" data-modal-action="retake-shot">Retake Screenshot</button>
-                  ${d.screenshotDataUrl ? `<button type="button" class="ks-btn" style="padding:3px 9px;font-size:11px" data-modal-action="remove-shot">Remove</button>` : ''}
-                </div>
-              </div>
-            </div>
-
-            ${
-              d.audioBase64
-                ? `<div class="ks-shot-box" style="flex-direction:row;align-items:center;justify-content:space-between;padding:8px 10px">
-                    <span class="ks-preview-audio-badge">🔊 Sentence Audio${d.audioDurationSec ? ` (${d.audioDurationSec}s WAV)` : ' (WAV)'}</span>
-                    <button type="button" class="ks-btn ks-btn-primary" data-modal-action="play-audio">▶ Play Audio</button>
-                   </div>`
-                : `<div style="font-size:11px;color:#94a3b8">Audio clip: Open the KotoStream popup and load subtitles (or click “Enable Sentence Audio”) to buffer tab audio for mining.</div>`
-            }
-          </div>
-
-          <div class="ks-modal-preview">
-            <div class="ks-preview-heading">
-              <span>Live Anki Field Preview</span>
-              <span style="font-size:11px;color:#94a3b8;font-weight:500">${escapeHtml(this.settings.anki.furiganaFormat.replace('_', ' '))}</span>
-            </div>
-            <div data-preview-fields style="display:flex;flex-direction:column;gap:8px"></div>
-          </div>
-        </div>
-
-        <div class="ks-modal-footer">
-          <span style="font-size:11px;color:#94a3b8">
-            ${this.settings.anki.enabled ? 'Will save to built-in SRS and export to AnkiConnect' : 'Will save to built-in SRS (enable AnkiConnect in Settings to auto-export)'}
-          </span>
-          <div style="display:flex;gap:8px">
-            <button type="button" class="ks-btn" data-modal-action="close">Cancel</button>
-            <button type="button" class="ks-btn ks-btn-primary" data-modal-action="save">
-              ${this.settings.anki.enabled ? 'Create Card & Send to Anki' : 'Create Card'}
-            </button>
-          </div>
-        </div>
-      </div>
-    `;
-
-    this.modalBackdropEl.classList.add('ks-open');
-    this.refreshModalPreview();
-    this.bindModalEvents();
-  }
-
-  private bindModalEvents() {
-    const d = this.cardDraft;
-    if (!d) return;
-
-    // Live-bind every editable input to update draft & preview
-    this.modalBackdropEl
-      .querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('[data-draft-field]')
-      .forEach((el) => {
-        el.addEventListener('input', () => {
-          const field = el.dataset.draftField as keyof CardDraft;
-          if (field === 'word') d.word = el.value;
-          else if (field === 'reading') d.reading = el.value;
-          else if (field === 'sentence') d.sentence = el.value;
-          else if (field === 'translation') d.translation = el.value;
-          else if (field === 'meaning') d.meaning = el.value;
-          else if (field === 'notes') d.notes = el.value;
-          else if (field === 'sourceTitle') d.sourceTitle = el.value;
-          else if (field === 'cardType') d.cardType = el.value as CardType;
-          this.refreshModalPreview();
-        });
-      });
-
-    this.modalBackdropEl.onclick = async (e) => {
-      e.stopPropagation();
-      const target = (e.target as HTMLElement).closest<HTMLElement>('[data-modal-action]');
-      if (!target) return;
-
-      const action = target.dataset.modalAction;
-      if (action === 'close') {
-        this.closeCardCreatorModal();
-      } else if (action === 'play-audio' && d.audioBase64) {
-        const playBtn = target as HTMLButtonElement;
-        playBtn.textContent = 'Playing…';
-        await playBase64Audio(d.audioBase64, d.audioMimeType);
-        window.setTimeout(() => {
-          playBtn.textContent = '▶ Play Audio';
-        }, Math.max(800, Math.round((d.audioDurationSec ?? 2) * 1000)));
-      } else if (action === 'retranslate') {
-        const statusEl = this.modalBackdropEl.querySelector<HTMLElement>('[data-trans-status]');
-        if (statusEl) statusEl.textContent = 'Translating…';
-        const transRes = await this.fetchSentenceTranslation(d.sentence, d.word);
-        d.translation = transRes.translation;
-        const transInput = this.modalBackdropEl.querySelector<HTMLTextAreaElement>('[data-draft-field="translation"]');
-        if (transInput) transInput.value = transRes.translation;
-        if (statusEl) {
-          const label =
-            transRes.providerUsed === 'openrouter'
-              ? 'Updated (OpenRouter AI)'
-              : transRes.providerUsed === 'google_free'
-                ? 'Updated (Google Translate)'
-                : 'Updated';
-          statusEl.textContent = transRes.translation ? label : 'Unavailable';
-        }
-        this.refreshModalPreview();
-      } else if (action === 'retake-shot') {
-        const shot = await this.captureVideoFrame();
-        d.screenshotDataUrl = shot.dataUrl;
-        d.screenshotFormat = shot.format;
-        d.screenshotMeta = shot.meta;
-        this.openCardCreatorModal();
-      } else if (action === 'remove-shot') {
-        d.screenshotDataUrl = undefined;
-        d.screenshotMeta = 'Screenshot removed';
-        this.openCardCreatorModal();
-      } else if (action === 'save') {
-        const saveBtn = target as HTMLButtonElement;
-        saveBtn.disabled = true;
-        saveBtn.textContent = 'Saving…';
-        await this.commitCardDraft(d);
-        this.closeCardCreatorModal();
-      }
-    };
-  }
-
-  private refreshModalPreview() {
-    const d = this.cardDraft;
-    if (!d) return;
-    const container = this.modalBackdropEl.querySelector<HTMLElement>('[data-preview-fields]');
-    if (!container) return;
-
-    const previewFields = buildAnkiFieldPreview(
-      {
-        word: d.word,
-        surfaceWord: d.surfaceWord,
-        reading: d.reading,
-        meaning: d.meaning,
-        sentence: d.sentence,
-        translation: d.translation,
-        notes: d.notes,
-        cardType: d.cardType,
-        sourceTitle: d.sourceTitle,
-        sourceUrl: d.sourceUrl,
-        screenshotDataUrl: d.screenshotDataUrl,
-        audioBase64: d.audioBase64,
-      },
-      this.settings.anki
-    );
-
-    if (previewFields.length === 0) {
-      container.innerHTML = `<div style="color:#94a3b8;font-size:12px">No Anki fields mapped yet. Configure Field Mapping in Settings.</div>`;
-      return;
-    }
-
-    container.innerHTML = previewFields
-      .map(
-        (f) => `
-        <div class="ks-preview-field">
-          <div class="ks-preview-label">${escapeHtml(f.fieldName)}</div>
-          <div class="ks-preview-val">${f.html}</div>
-        </div>`
-      )
-      .join('');
-  }
-
-  private closeCardCreatorModal() {
-    this.modalBackdropEl.classList.remove('ks-open');
-    this.modalBackdropEl.innerHTML = '';
-    this.cardDraft = null;
   }
 
   private async commitCardDraft(d: CardDraft) {
@@ -1953,19 +1365,19 @@ export class OverlayManager {
       updatedAt: Date.now(),
     };
     this.renderCurrentSubtitle();
-    // The mined word just became Learning — refresh its underline in the panel lines too
     this.refreshBrowserLineStatuses();
 
     if (this.settings.anki.enabled) {
       try {
-        await exportCardToAnki(card, this.settings.anki);
-        this.showToast(`Created “${card.word}” → Saved to SRS & Anki!`);
+        const noteId = await exportCardToAnki(card, this.settings.anki);
+        await updateMinedCard({ ...card, ankiNoteId: noteId });
+        this.showToast(`Created “${card.word}” → Exported to Anki!`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'AnkiConnect unavailable';
-        this.showToast(`Saved to SRS (Anki failed: ${msg})`);
+        this.showToast(`Saved locally (Anki failed: ${msg})`);
       }
     } else {
-      this.showToast(`Created “${card.word}” in built-in SRS!`);
+      this.showToast(`Saved “${card.word}” to Mined Cards!`);
     }
   }
 
@@ -1978,7 +1390,6 @@ export class OverlayManager {
 
   private closePopover() {
     this.popoverEl.classList.remove('ks-open');
-    // Clear the selection highlight across BOTH the subtitle box and sidebar browser lines
     this.shadow.querySelectorAll('.ks-selected').forEach((el) => el.classList.remove('ks-selected'));
     this.activeToken = null;
     this.activePopoverCueId = null;
@@ -2003,13 +1414,21 @@ export class OverlayManager {
     }
   }
 
-  private cycleFuriganaMode() {
+  private async cycleFuriganaMode() {
     const order: FuriganaMode[] = ['unknown_and_learning', 'all', 'off'];
     const idx = order.indexOf(this.settings.overlay.furiganaMode);
-    this.settings.overlay.furiganaMode = order[(idx + 1) % order.length];
+    const nextMode = order[(idx + 1) % order.length];
+    this.settings = {
+      ...this.settings,
+      overlay: { ...this.settings.overlay, furiganaMode: nextMode },
+    };
     this.updateFuriganaLabel();
     this.renderCurrentSubtitle();
-    this.showToast(`Furigana: ${this.settings.overlay.furiganaMode.replace(/_/g, ' ')}`);
+    if (this.sidebarEl.classList.contains('ks-open') && this.sidebarMode === 'browser') {
+      this.renderSubtitleBrowser();
+    }
+    await saveSettings(this.settings);
+    this.showToast(`Furigana: ${nextMode === 'unknown_and_learning' ? 'Smart' : nextMode === 'all' ? 'All' : 'Off'}`);
   }
 
   private updateFuriganaLabel() {
@@ -2019,9 +1438,7 @@ export class OverlayManager {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // Migaku-style Subtitle Browser: full episode transcript (past + upcoming lines),
-  // current line highlighted with live auto-follow, click a line to seek, and every
-  // word stays hoverable/clickable for dictionary lookups & card mining!
+  // Migaku-style Subtitle Browser & Library Sidebar
   // ─────────────────────────────────────────────────────────────────────────────
 
   private getBrowserLines(): SubtitleLine[] {
@@ -2029,19 +1446,18 @@ export class OverlayManager {
     this.browserLinesCache =
       this.loadedFileSubtitles.length > 0
         ? this.loadedFileSubtitles
-        : [...this.subtitleHistory].reverse(); // live STT → chronological order
+        : [...this.subtitleHistory].reverse();
     return this.browserLinesCache;
   }
 
   private getBrowserActiveIdx(lines: SubtitleLine[]): number {
     if (this.loadedFileSubtitles.length === 0) {
-      return Math.max(0, lines.length - 1); // live: newest line at the bottom
+      return Math.max(0, lines.length - 1);
     }
     if (this.browserActiveIds.size > 0) {
       const idx = lines.findIndex((c) => this.browserActiveIds.has(c.id));
       if (idx >= 0) return idx;
     }
-    // No active cue (e.g. panel opened during a gap): anchor near current playback time
     if (this.video && lines.length > 0 && lines[0].videoTimeSec !== undefined) {
       const t = this.video.currentTime - this.subtitleOffsetSec;
       return findCueIndexNearTime(lines, t);
@@ -2055,7 +1471,7 @@ export class OverlayManager {
 
     if (lines.length === 0) {
       if (titleEl) titleEl.textContent = 'Subtitles';
-      this.sidebarListEl.innerHTML = `<div style="color:#94a3b8;font-size:12px;padding:12px;text-align:center">No subtitles yet. Load an .srt/.ass file, pick from Library, or start AI Subs.</div>`;
+      this.sidebarListEl.innerHTML = `<div style="color:#94a3b8;font-size:12px;padding:12px;text-align:center">No subtitles yet. Load an .srt/.ass file, pick from Library, or run AI Pre-Scan.</div>`;
       this.browserWindowRange = null;
       return;
     }
@@ -2070,8 +1486,6 @@ export class OverlayManager {
       titleEl.textContent = `${label} (${lines.length} lines)`;
     }
 
-    // Windowed render: ±BROWSER_WINDOW lines around the active line keeps the DOM light
-    // even for 2,000-cue episodes, while still showing everything around the playhead.
     const activeIdx = this.getBrowserActiveIdx(lines);
     const start = Math.max(0, activeIdx - BROWSER_WINDOW_LINES);
     const end = Math.min(lines.length, activeIdx + BROWSER_WINDOW_LINES + 1);
@@ -2090,7 +1504,6 @@ export class OverlayManager {
       if (this.browserActiveIds.has(cue.id)) {
         itemEl.classList.add('ks-active');
       }
-      // Live AI mode: the newest line (bottom) is the "active" one
       if (isLive && start + i === lines.length - 1) {
         itemEl.classList.add('ks-active');
       }
@@ -2110,28 +1523,21 @@ export class OverlayManager {
     this.sidebarListEl.innerHTML = '';
     this.sidebarListEl.appendChild(frag);
 
-    // Tokenize each visible line (reusing cached MeCab morphemes) and make words hoverable
     for (const { cue, el } of lineContainers) {
       const textEl = el.querySelector<HTMLElement>('.ks-history-text')!;
       const tokens = this.renderBrowserLineTokens(cue, textEl);
       allTokens.push(...tokens);
     }
 
-    // Prefetch dictionary entries + verify compounds/expressions for the whole window
     this.prefetchSubtitleWords(allTokens);
 
     if (this.browserFollowLive) {
       this.scrollBrowserToActive();
     }
-    // Sync the "Follow live" pill visibility without re-entering updateBrowserActive()
     const followBtn = this.sidebarEl.querySelector<HTMLElement>('.ks-follow-btn');
     if (followBtn) followBtn.style.display = this.browserFollowLive ? 'none' : 'flex';
   }
 
-  /**
-   * Tokenizes one browser line into interactive word spans (Migaku-style: hover any word
-   * in the transcript panel for instant dictionary lookups & card mining).
-   */
   private renderBrowserLineTokens(cue: SubtitleLine, textEl: HTMLElement): Token[] {
     const lineText = cue.text.replace(/\n/g, ' ').trim();
     textEl.innerHTML = '';
@@ -2159,8 +1565,6 @@ export class OverlayManager {
       if (token.isWord) {
         span.classList.add('ks-word');
       }
-      // While the popover is open on a word from THIS line, keep it selected after
-      // status-change re-renders so the user never loses track of the target word.
       if (
         this.popoverEl.classList.contains('ks-open') &&
         this.activeToken &&
@@ -2216,24 +1620,14 @@ export class OverlayManager {
     return tokens;
   }
 
-  /**
-   * Cheap active-line update: re-highlights the current cue and keeps it centered.
-   * Re-renders the window only when the playhead crossed the window edge.
-   */
   private updateBrowserActive() {
     if (this.sidebarMode !== 'browser') return;
     const lines = this.getBrowserLines();
     if (lines.length === 0) return;
 
     const activeIdx = this.getBrowserActiveIdx(lines);
-
-    // During silent high-speed prescan the playhead sweeps the episode far too fast
-    // to re-render the panel per cue — skip until it finishes.
     if (this.captureState.status === 'prescanning') return;
 
-    // Re-anchor the window only when the playhead drifted within 5 lines of the window
-    // edge AND the window would actually change (guards against re-render loops at the
-    // head/tail of the transcript).
     if (this.browserWindowRange && this.browserFollowLive) {
       const nearStart =
         activeIdx - this.browserWindowRange.start < 5 && this.browserWindowRange.start > 0;
@@ -2256,7 +1650,6 @@ export class OverlayManager {
         activeEl = activeEl ?? el;
       }
     }
-    // Live mode: highlight the newest line
     if (this.loadedFileSubtitles.length === 0 && !activeEl && items.length > 0) {
       const last = items[items.length - 1];
       last.classList.add('ks-active');
@@ -2281,10 +1674,6 @@ export class OverlayManager {
     this.sidebarListEl.scrollTop = Math.max(0, target);
   }
 
-  /**
-   * Live AI subtitle updates: only yank the panel when following; if the user scrolled
-   * away to read, leave their view untouched until they click "Follow live".
-   */
   private updateLiveBrowser() {
     if (this.loadedFileSubtitles.length > 0) return;
     if (!this.browserFollowLive) return;
@@ -2300,7 +1689,6 @@ export class OverlayManager {
     }
   }
 
-  /** Re-renders only the browser lines that contain a just-verified compound/expression. */
   private patchBrowserLines(compound: string) {
     if (this.sidebarMode !== 'browser') return;
     const lines = this.getBrowserLines();
@@ -2318,12 +1706,6 @@ export class OverlayManager {
     }
   }
 
-  /**
-   * Live status refresh: after the user marks a word Known/Learning/Unknown (or mines a
-   * card, which marks it Learning), re-renders ONLY the sidebar browser lines whose
-   * token statuses actually changed — so underlines & furigana update instantly in the
-   * panel, not just in the main subtitle box.
-   */
   private refreshBrowserLineStatuses() {
     if (!this.sidebarEl.classList.contains('ks-open') || this.sidebarMode !== 'browser') return;
     const lines = this.getBrowserLines();
@@ -2339,8 +1721,6 @@ export class OverlayManager {
 
       const lineText = cue.text.replace(/\n/g, ' ').trim();
       const morphemes = this.morphemeCache.get(lineText);
-      // Lines still awaiting their MeCab results re-render with fresh statuses via their
-      // pending browserPatch — skip them so the fallback tokenizer never churns them.
       if (!morphemes) continue;
 
       const freshTokens = buildTokensFromMorphemes(
@@ -2408,19 +1788,4 @@ export class OverlayManager {
       this.toastEl.classList.remove('ks-visible');
     }, 3000);
   }
-}
-
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-function formatSeconds(sec: number): string {
-  const s = Math.max(0, Math.floor(sec));
-  const m = Math.floor(s / 60);
-  const rem = s % 60;
-  return `${m}:${String(rem).padStart(2, '0')}`;
 }

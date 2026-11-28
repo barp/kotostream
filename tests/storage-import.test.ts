@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { bulkImportVocabEntries, getVocabMap } from '../src/core/storage';
+import {
+  addMinedCard,
+  bulkImportVocabEntries,
+  deleteMinedCard,
+  getCardMedia,
+  getMinedCards,
+  getVocabMap,
+  hydrateMinedCard,
+  updateMinedCard,
+} from '../src/core/storage';
 
 /**
  * Regression suite for the Migaku import write path: a quota-exceeded rejection used to be
@@ -27,6 +36,10 @@ function installFakeChrome(opts: FakeChromeOptions = {}): Map<string, unknown> {
           if (!opts.dropWrites) {
             for (const [k, v] of Object.entries(items)) store.set(k, v);
           }
+        },
+        remove: async (keys: string | string[]) => {
+          const list = Array.isArray(keys) ? keys : [keys];
+          for (const k of list) store.delete(k);
         },
       },
     },
@@ -99,5 +112,60 @@ describe('bulkImportVocabEntries — verified persistence', () => {
     expect(res.persisted).toBe(false);
     expect(res.added).toBe(0);
     expect(res.error).toBeTruthy();
+  });
+});
+
+describe('mined card media decoupling', () => {
+  it('stores heavy audio/screenshot blobs under per-card keys and hydrates on demand', async () => {
+    const store = installFakeChrome();
+    const created = await addMinedCard({
+      word: '約束',
+      surfaceWord: '約束',
+      reading: 'やくそく',
+      meaning: 'promise',
+      sentence: '約束を守る。',
+      sourceTitle: 'Prime Video',
+      sourceUrl: 'https://www.primevideo.com/detail/test',
+      audioBase64: 'UklGR_FULL_48KHZ_STEREO_WAV',
+      audioMimeType: 'audio/wav',
+      screenshotDataUrl: 'data:image/webp;base64,FULL_SHOT',
+      screenshotFormat: 'webp',
+    });
+
+    // Returned card is immediately hydrated for direct Anki export
+    expect(created.audioBase64).toBe('UklGR_FULL_48KHZ_STEREO_WAV');
+    expect(created.screenshotDataUrl).toBe('data:image/webp;base64,FULL_SHOT');
+    expect(created.hasAudio).toBe(true);
+    expect(created.hasScreenshot).toBe(true);
+
+    // Index array in kotostream_cards stays lightweight without base64 blobs
+    const listed = await getMinedCards();
+    expect(listed).toHaveLength(1);
+    expect(listed[0].audioBase64).toBeUndefined();
+    expect(listed[0].screenshotDataUrl).toBeUndefined();
+    expect(listed[0].hasAudio).toBe(true);
+    expect(listed[0].hasScreenshot).toBe(true);
+
+    // Per-card media key holds exact untouched audio and screenshot
+    const media = await getCardMedia(created.id);
+    expect(media.audioBase64).toBe('UklGR_FULL_48KHZ_STEREO_WAV');
+    expect(media.screenshotDataUrl).toBe('data:image/webp;base64,FULL_SHOT');
+
+    // Hydration restores full blobs on demand
+    const hydrated = await hydrateMinedCard(listed[0]);
+    expect(hydrated.audioBase64).toBe('UklGR_FULL_48KHZ_STEREO_WAV');
+    expect(hydrated.screenshotDataUrl).toBe('data:image/webp;base64,FULL_SHOT');
+
+    // Updating ankiNoteId keeps media decoupled and intact
+    await updateMinedCard({ ...listed[0], ankiNoteId: 999 });
+    const afterUpdate = await getMinedCards();
+    expect(afterUpdate[0].ankiNoteId).toBe(999);
+    expect(afterUpdate[0].audioBase64).toBeUndefined();
+    expect((await getCardMedia(created.id)).audioBase64).toBe('UklGR_FULL_48KHZ_STEREO_WAV');
+
+    // Deleting the card cleans up both the index entry and its media key
+    await deleteMinedCard(created.id);
+    expect(await getMinedCards()).toHaveLength(0);
+    expect(store.has(`kotostream_card_media_${created.id}`)).toBe(false);
   });
 });

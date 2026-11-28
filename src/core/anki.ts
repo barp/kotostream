@@ -75,6 +75,7 @@ export async function getAnkiModelFields(modelName: string, url: string): Promis
 }
 
 import { alignFuriganaSegments } from './furigana';
+import { escapeHtml } from './html';
 
 /**
  * Formats a Japanese word with furigana according to Migaku-style settings.
@@ -234,7 +235,6 @@ export function buildAnkiFieldPreview(
       screenshotDataUrl: card.screenshotDataUrl,
       audioBase64: card.audioBase64,
       createdAt: Date.now(),
-      srs: { intervalDays: 0, easeFactor: 2.5, repetitions: 0, dueAt: Date.now() },
     },
     settings,
     {
@@ -316,12 +316,4 @@ export function exportCardsToTsv(cards: MinedCard[]): string {
 function stripDataUrlPrefix(dataUrl: string): string {
   const idx = dataUrl.indexOf('base64,');
   return idx >= 0 ? dataUrl.slice(idx + 7) : dataUrl;
-}
-
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }

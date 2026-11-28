@@ -7,7 +7,6 @@ import {
   formatWordWithFurigana,
 } from '../src/core/anki';
 import { DEFAULT_SETTINGS, type MinedCard } from '../src/types';
-import { createInitialSrsState } from '../src/core/srs';
 
 const sampleCard: MinedCard = {
   id: 'card_123',
@@ -22,7 +21,6 @@ const sampleCard: MinedCard = {
   sourceTitle: 'Prime Video Anime',
   sourceUrl: 'https://www.primevideo.com/detail/xyz',
   createdAt: 1000,
-  srs: createInitialSrsState(1000),
 };
 
 describe('Migaku-style anki helpers', () => {
