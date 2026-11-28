@@ -86,6 +86,23 @@ export const Dashboard: React.FC = () => {
     void reloadAll();
   }, [reloadAll]);
 
+  useEffect(() => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.onChanged) return;
+    const onChanged = (changes: Record<string, chrome.storage.StorageChange>, areaName: string) => {
+      if (areaName !== 'local') return;
+      if (
+        changes.kotostream_cards ||
+        changes.kotostream_vocab ||
+        changes.kotostream_subtitle_library ||
+        changes.kotostream_settings
+      ) {
+        void reloadAll();
+      }
+    };
+    chrome.storage.onChanged.addListener(onChanged);
+    return () => chrome.storage.onChanged.removeListener(onChanged);
+  }, [reloadAll]);
+
   return (
     <div className="layout">
       <header className="topbar">

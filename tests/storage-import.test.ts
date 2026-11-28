@@ -7,6 +7,7 @@ import {
   getMinedCards,
   getVocabMap,
   hydrateMinedCard,
+  markCardSentToAnki,
   updateMinedCard,
 } from '../src/core/storage';
 
@@ -161,6 +162,15 @@ describe('mined card media decoupling', () => {
     const afterUpdate = await getMinedCards();
     expect(afterUpdate[0].ankiNoteId).toBe(999);
     expect(afterUpdate[0].audioBase64).toBeUndefined();
+    expect((await getCardMedia(created.id)).audioBase64).toBe('UklGR_FULL_48KHZ_STEREO_WAV');
+
+    // Marking a card as sent to Anki persists both ankiNoteId and ankiSentAt without touching media
+    const marked = await markCardSentToAnki(created.id, 123456789);
+    expect(marked?.ankiNoteId).toBe(123456789);
+    expect(typeof marked?.ankiSentAt).toBe('number');
+    const afterMark = await getMinedCards();
+    expect(afterMark[0].ankiNoteId).toBe(123456789);
+    expect(typeof afterMark[0].ankiSentAt).toBe('number');
     expect((await getCardMedia(created.id)).audioBase64).toBe('UklGR_FULL_48KHZ_STEREO_WAV');
 
     // Deleting the card cleans up both the index entry and its media key

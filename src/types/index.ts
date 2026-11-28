@@ -255,6 +255,7 @@ export interface MinedCard {
   audioMimeType?: string;
   createdAt: number;
   ankiNoteId?: number;
+  ankiSentAt?: number;
 }
 
 export type CaptureState =

@@ -605,6 +605,15 @@ body {
   border-radius: 8px;
 }
 
+.btn-sent,
+.btn-sent:disabled {
+  background: rgba(52, 211, 153, 0.14);
+  border-color: rgba(52, 211, 153, 0.38);
+  color: #6ee7b7;
+  opacity: 1;
+  cursor: default;
+}
+
 .btn-danger {
   background: rgba(220, 38, 38, 0.2);
   border-color: rgba(248, 113, 113, 0.4);

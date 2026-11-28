@@ -23,10 +23,10 @@ import {
   bindSubtitleTrackToUrl,
   findSubtitleTrackForUrl,
   getSubtitleLibrary,
+  markCardSentToAnki,
   saveSettings,
   saveSubtitleTrack,
   setWordStatus,
-  updateMinedCard,
   updateSubtitleTrackOffset,
 } from '../../core/storage';
 import { exportCardToAnki } from '../../core/anki';
@@ -1527,7 +1527,7 @@ export class OverlayManager {
     if (this.settings.anki.enabled) {
       try {
         const noteId = await exportCardToAnki(card, this.settings.anki);
-        await updateMinedCard({ ...card, ankiNoteId: noteId });
+        await markCardSentToAnki(card.id, noteId);
         this.showToast(`Created “${card.word}” → Exported to Anki!`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'AnkiConnect unavailable';

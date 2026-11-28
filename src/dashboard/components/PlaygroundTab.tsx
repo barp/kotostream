@@ -7,7 +7,7 @@ import type {
   VocabEntry,
   WordStatus,
 } from '../../types';
-import { addMinedCard, setWordStatus, updateMinedCard } from '../../core/storage';
+import { addMinedCard, markCardSentToAnki, setWordStatus } from '../../core/storage';
 import { buildAnkiFieldPreview, exportCardToAnki } from '../../core/anki';
 import { tokenizeJapanese } from '../../core/tokenizer';
 import { lookupLocal } from '../../core/dictionary';
@@ -119,7 +119,7 @@ export const PlaygroundTab: React.FC<PlaygroundTabProps> = ({
     if (settings.anki.enabled) {
       try {
         const noteId = await exportCardToAnki(card, settings.anki);
-        await updateMinedCard({ ...card, ankiNoteId: noteId });
+        await markCardSentToAnki(card.id, noteId);
         onNotice('success', `Mined “${word}” → Exported to Anki!`);
       } catch (err) {
         onNotice(

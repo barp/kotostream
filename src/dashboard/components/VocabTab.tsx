@@ -6,8 +6,8 @@ import {
   getCardMedia,
   getVocabMap,
   hydrateMinedCard,
+  markCardSentToAnki,
   setWordStatus,
-  updateMinedCard,
 } from '../../core/storage';
 import { exportCardsToTsv, exportCardToAnki } from '../../core/anki';
 import {
@@ -167,11 +167,12 @@ export const VocabTab: React.FC<VocabTabProps> = ({
   );
 
   const handleSyncCardToAnki = async (card: MinedCard) => {
+    if (card.ankiNoteId || card.ankiSentAt) return;
     setSyncingCardId(card.id);
     try {
       const hydrated = await hydrateMinedCard(card);
       const noteId = await exportCardToAnki(hydrated, settings.anki);
-      await updateMinedCard({ ...card, ankiNoteId: noteId });
+      await markCardSentToAnki(card.id, noteId);
       await onReload();
       onNotice('success', `Exported “${card.word}” to Anki (Note #${noteId})`);
     } catch (err) {
@@ -425,6 +426,7 @@ export const VocabTab: React.FC<VocabTabProps> = ({
                 const thumb = c.screenshotDataUrl || cardThumbs[c.id];
                 const hasAudio = Boolean(c.hasAudio || c.audioBase64);
                 const isPlaying = playingCardId === c.id;
+                const isSentToAnki = Boolean(c.ankiNoteId || c.ankiSentAt);
                 return (
                   <article className="mined-card" key={c.id}>
                     {thumb && (
@@ -458,8 +460,11 @@ export const VocabTab: React.FC<VocabTabProps> = ({
                             <span className="mined-reading">{c.reading}</span>
                           )}
                         </div>
-                        {c.ankiNoteId && (
-                          <span className="anki-synced-badge" title={`Anki Note #${c.ankiNoteId}`}>
+                        {isSentToAnki && (
+                          <span
+                            className="anki-synced-badge"
+                            title={c.ankiNoteId ? `Sent to Anki (Note #${c.ankiNoteId})` : 'Sent to Anki'}
+                          >
                             <CheckIcon size={11} /> Anki
                           </span>
                         )}
@@ -489,15 +494,26 @@ export const VocabTab: React.FC<VocabTabProps> = ({
                         )}
                         <button
                           type="button"
-                          className="btn btn-sm"
-                          disabled={syncingCardId === c.id}
+                          className={`btn btn-sm ${isSentToAnki ? 'btn-sent' : ''}`}
+                          disabled={syncingCardId === c.id || isSentToAnki}
                           onClick={() => void handleSyncCardToAnki(c)}
+                          title={
+                            isSentToAnki
+                              ? c.ankiNoteId
+                                ? `Already sent to Anki (Note #${c.ankiNoteId})`
+                                : 'Already sent to Anki'
+                              : 'Export this card to Anki via AnkiConnect'
+                          }
                         >
-                          {syncingCardId === c.id
-                            ? 'Sending…'
-                            : c.ankiNoteId
-                              ? 'Re-send Anki'
-                              : 'Send to Anki'}
+                          {syncingCardId === c.id ? (
+                            'Sending…'
+                          ) : isSentToAnki ? (
+                            <>
+                              <CheckIcon size={12} /> Sent to Anki
+                            </>
+                          ) : (
+                            'Send to Anki'
+                          )}
                         </button>
                       </div>
 

@@ -315,6 +315,23 @@ export async function updateMinedCard(updated: MinedCard): Promise<void> {
   }
 }
 
+export async function markCardSentToAnki(
+  cardId: string,
+  ankiNoteId?: number
+): Promise<MinedCard | null> {
+  const cards = await storageGet<MinedCard[]>(STORAGE_KEYS.CARDS, []);
+  const idx = cards.findIndex((c) => c.id === cardId);
+  if (idx < 0) return null;
+  const updated: MinedCard = {
+    ...cards[idx],
+    ...(ankiNoteId !== undefined ? { ankiNoteId } : {}),
+    ankiSentAt: Date.now(),
+  };
+  cards[idx] = stripCardMedia(updated);
+  await storageSet({ [STORAGE_KEYS.CARDS]: cards });
+  return cards[idx];
+}
+
 export async function deleteMinedCard(cardId: string): Promise<void> {
   const cards = await storageGet<MinedCard[]>(STORAGE_KEYS.CARDS, []);
   const filtered = cards.filter((c) => c.id !== cardId);
