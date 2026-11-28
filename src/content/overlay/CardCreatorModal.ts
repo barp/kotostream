@@ -36,6 +36,7 @@ export interface CardCreatorCallbacks {
   }>;
   commitDraft: (draft: CardDraft) => Promise<void>;
   showToast: (msg: string) => void;
+  onClose?: () => void;
 }
 
 /**
@@ -234,10 +235,14 @@ export class CardCreatorModal {
   }
 
   public close() {
+    const wasOpen = this.isOpen;
     this.detachKeyGuard();
     this.backdropEl.classList.remove('ks-open');
     this.backdropEl.innerHTML = '';
     this.draft = null;
+    if (wasOpen) {
+      this.callbacks.onClose?.();
+    }
   }
 
   private renderScreenshotBox() {

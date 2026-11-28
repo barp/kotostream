@@ -39,6 +39,11 @@ function scanPrimePlayerMetadata(): { title: string; episodeText: string } {
     cachedEpisodeText = '';
   }
 
+  // Skip expensive DOM/TreeWalker scanning once both title and episode are cached for this URL
+  if (cachedTitle && cachedEpisodeText && EPISODE_HINT_REGEX.test(cachedEpisodeText)) {
+    return { title: cachedTitle, episodeText: cachedEpisodeText };
+  }
+
   // 1. Check browser MediaSession metadata (Prime populates this for OS media controls!)
   const msMeta = typeof navigator !== 'undefined' ? navigator.mediaSession?.metadata : null;
   if (msMeta) {

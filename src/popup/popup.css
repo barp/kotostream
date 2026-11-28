@@ -8,7 +8,7 @@
   --ks-text: #f1f5f9;
   --ks-text-soft: #cbd5e1;
   --ks-text-muted: #94a3b8;
-  --ks-text-dim: #64748b;
+  --ks-text-dim: #94a3b8;
   --ks-accent: #6366f1;
   --ks-accent-light: #a5b4fc;
   --ks-accent-grad: linear-gradient(135deg, #4f46e5, #7c3aed);
@@ -411,6 +411,8 @@ body {
   gap: 5px;
   max-height: 175px;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
 }
 
 .sub-item {

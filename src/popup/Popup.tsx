@@ -38,9 +38,11 @@ export const Popup: React.FC = () => {
   const [tabUrl, setTabUrl] = useState<string>('');
   const [siteLabel, setSiteLabel] = useState('Current Tab');
   const [captureState, setCaptureState] = useState<CaptureState>({ status: 'idle' });
+  const [captureTabId, setCaptureTabId] = useState<number | null>(null);
   const [lastSubtitle, setLastSubtitle] = useState<string>('');
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [stats, setStats] = useState({ known: 0, learning: 0, mined: 0 });
+  const activeTabIdRef = React.useRef<number | undefined>(undefined);
 
   // Automatic Jimaku subtitle matching state
   const [searchQuery, setSearchQuery] = useState('');
@@ -145,6 +147,7 @@ export const Popup: React.FC = () => {
       ]);
 
       const activeTab = tabs[0];
+      activeTabIdRef.current = activeTab?.id;
       setTabId(activeTab?.id);
       setTabUrl(activeTab?.url ?? '');
       setSiteLabel(detectSiteLabel(activeTab?.url));
@@ -159,8 +162,11 @@ export const Popup: React.FC = () => {
 
       const capRes = (await chrome.runtime.sendMessage({
         type: 'GET_CAPTURE_STATE',
-      } satisfies ExtensionMessage)) as { state?: CaptureState };
-      if (capRes?.state) setCaptureState(capRes.state);
+      } satisfies ExtensionMessage)) as { state?: CaptureState; activeTabId?: number | null };
+      if (capRes?.state) {
+        setCaptureState(capRes.state);
+        setCaptureTabId(capRes.activeTabId ?? ('tabId' in capRes.state ? capRes.state.tabId : null));
+      }
 
       let detectedShow = '';
       let detectedEp = '';
@@ -219,8 +225,13 @@ export const Popup: React.FC = () => {
     const listener = (msg: ExtensionMessage) => {
       if (msg.type === 'CAPTURE_STATE_CHANGED') {
         setCaptureState(msg.state);
+        setCaptureTabId(
+          msg.tabId ?? ('tabId' in msg.state ? msg.state.tabId : null)
+        );
       } else if (msg.type === 'SUBTITLE_RECEIVED') {
-        setLastSubtitle(msg.subtitle.text);
+        if (msg.tabId === undefined || msg.tabId === activeTabIdRef.current) {
+          setLastSubtitle(msg.subtitle.text);
+        }
       }
     };
     chrome.runtime.onMessage.addListener(listener);
@@ -271,7 +282,10 @@ export const Popup: React.FC = () => {
           type: 'START_AUDIO_BUFFER',
           tabId,
         } satisfies ExtensionMessage)) as CaptureState;
-        if (bufState?.status) setCaptureState(bufState);
+        if (bufState?.status) {
+          setCaptureState(bufState);
+          setCaptureTabId(bufState.status === 'idle' || bufState.status === 'error' ? null : tabId);
+        }
       }
 
       setActiveTrackName(savedTrack.fileName);
@@ -281,13 +295,24 @@ export const Popup: React.FC = () => {
     }
   };
 
-  const isCapturingLive =
-    captureState.status === 'prescanning' ||
-    captureState.status === 'listening' ||
-    captureState.status === 'transcribing' ||
-    captureState.status === 'starting';
+  const stateBelongsToOtherTab =
+    captureState.status !== 'idle' &&
+    captureState.status !== 'error' &&
+    captureTabId !== null &&
+    tabId !== undefined &&
+    captureTabId !== tabId;
 
-  const isAudioBufferActive = captureState.status === 'buffering' || isCapturingLive;
+  const effectiveCaptureState: CaptureState = stateBelongsToOtherTab
+    ? { status: 'idle' }
+    : captureState;
+
+  const isCapturingLive =
+    effectiveCaptureState.status === 'prescanning' ||
+    effectiveCaptureState.status === 'listening' ||
+    effectiveCaptureState.status === 'transcribing' ||
+    effectiveCaptureState.status === 'starting';
+
+  const isAudioBufferActive = effectiveCaptureState.status === 'buffering' || isCapturingLive;
 
   const handleToggleAudioBuffer = async () => {
     const type = isAudioBufferActive ? 'STOP_CAPTURE' : 'START_AUDIO_BUFFER';
@@ -295,7 +320,10 @@ export const Popup: React.FC = () => {
       type,
       tabId,
     } satisfies ExtensionMessage)) as CaptureState;
-    if (next?.status) setCaptureState(next);
+    if (next?.status) {
+      setCaptureState(next);
+      setCaptureTabId(next.status === 'idle' || next.status === 'error' ? null : (tabId ?? null));
+    }
   };
 
   const handleToggleCapture = async () => {
@@ -304,7 +332,10 @@ export const Popup: React.FC = () => {
       type,
       tabId,
     } satisfies ExtensionMessage)) as CaptureState;
-    if (next?.status) setCaptureState(next);
+    if (next?.status) {
+      setCaptureState(next);
+      setCaptureTabId(next.status === 'idle' || next.status === 'error' ? null : (tabId ?? null));
+    }
   };
 
   const isEnabled = settings?.enabled ?? true;
@@ -317,11 +348,14 @@ export const Popup: React.FC = () => {
     setSettings(updated);
 
     if (!nextEnabled) {
-      if (isAudioBufferActive) {
+      if (isAudioBufferActive || stateBelongsToOtherTab) {
         const stopped = (await chrome.runtime.sendMessage({
           type: 'STOP_CAPTURE',
         } satisfies ExtensionMessage)) as CaptureState;
-        if (stopped?.status) setCaptureState(stopped);
+        if (stopped?.status) {
+          setCaptureState(stopped);
+          setCaptureTabId(null);
+        }
       }
       if (tabId) {
         await chrome.tabs
@@ -504,42 +538,45 @@ export const Popup: React.FC = () => {
             <div className="capture-status">
               <span
                 className={`dot ${
-                  captureState.status === 'buffering'
+                  effectiveCaptureState.status === 'buffering'
                     ? 'listening'
-                    : captureState.status === 'prescanning'
+                    : effectiveCaptureState.status === 'prescanning'
                       ? 'transcribing'
-                      : captureState.status
+                      : effectiveCaptureState.status
                 }`}
               />
               <span>
-                {captureState.status === 'idle' && 'Sentence Audio Buffer: Off'}
-                {captureState.status === 'buffering' && '🔊 Sentence Audio Buffer: Active (60s stereo)'}
-                {captureState.status === 'starting' && 'Starting silent AI pre-scan…'}
-                {captureState.status === 'prescanning' &&
-                  (captureState.phase === 'finalizing'
-                    ? `Finalizing AI subtitles… (${captureState.linesGenerated} lines)`
-                    : `🔇 Silent AI Pre-Scan (${captureState.playbackRate}x) · ${Math.round(captureState.progress * 100)}%`)}
-                {captureState.status === 'listening' && 'Live AI Subs + Audio Buffer: Active'}
-                {captureState.status === 'transcribing' && 'Generating Japanese subtitles…'}
-                {captureState.status === 'error' && 'Capture error'}
+                {effectiveCaptureState.status === 'idle' &&
+                  (stateBelongsToOtherTab
+                    ? 'Audio capture active in another tab'
+                    : 'Sentence Audio Buffer: Off')}
+                {effectiveCaptureState.status === 'buffering' && '🔊 Sentence Audio Buffer: Active (60s stereo)'}
+                {effectiveCaptureState.status === 'starting' && 'Starting silent AI pre-scan…'}
+                {effectiveCaptureState.status === 'prescanning' &&
+                  (effectiveCaptureState.phase === 'finalizing'
+                    ? `Finalizing AI subtitles… (${effectiveCaptureState.linesGenerated} lines)`
+                    : `🔇 Silent AI Pre-Scan (${effectiveCaptureState.playbackRate}x) · ${Math.round(effectiveCaptureState.progress * 100)}%`)}
+                {effectiveCaptureState.status === 'listening' && 'Live AI Subs + Audio Buffer: Active'}
+                {effectiveCaptureState.status === 'transcribing' && 'Generating Japanese subtitles…'}
+                {effectiveCaptureState.status === 'error' && 'Capture error'}
               </span>
             </div>
 
-            {captureState.status === 'prescanning' && (
+            {effectiveCaptureState.status === 'prescanning' && (
               <div className="prescan-box">
                 <div className="progress-track">
                   <div
                     className="progress-fill"
                     style={{
-                      width: `${Math.min(100, Math.max(2, Math.round(captureState.progress * 100)))}%`,
+                      width: `${Math.min(100, Math.max(2, Math.round(effectiveCaptureState.progress * 100)))}%`,
                     }}
                   />
                 </div>
                 <div className="progress-meta">
                   <span>
-                    {formatSecClock(captureState.currentTimeSec)} / {formatSecClock(captureState.durationSec)}
+                    {formatSecClock(effectiveCaptureState.currentTimeSec)} / {formatSecClock(effectiveCaptureState.durationSec)}
                   </span>
-                  <span>{captureState.linesGenerated} lines pre-created</span>
+                  <span>{effectiveCaptureState.linesGenerated} lines pre-created</span>
                 </div>
                 <div className="progress-hint">
                   Sound is muted while scanning. You’ll get a notification as soon as subtitles are ready.
@@ -550,18 +587,18 @@ export const Popup: React.FC = () => {
             <div className="btn-row">
               <button
                 type="button"
-                className={`btn btn-compact ${captureState.status === 'buffering' ? 'btn-danger' : 'btn-primary'}`}
-                disabled={captureState.status === 'prescanning'}
+                className={`btn btn-compact ${effectiveCaptureState.status === 'buffering' ? 'btn-danger' : 'btn-primary'}`}
+                disabled={effectiveCaptureState.status === 'prescanning'}
                 onClick={handleToggleAudioBuffer}
               >
-                {captureState.status === 'buffering' ? 'Stop Audio Buffer' : 'Enable Sentence Audio'}
+                {effectiveCaptureState.status === 'buffering' ? 'Stop Audio Buffer' : 'Enable Sentence Audio'}
               </button>
               <button
                 type="button"
                 className={`btn btn-compact ${isCapturingLive ? 'btn-danger' : ''}`}
                 onClick={handleToggleCapture}
               >
-                {captureState.status === 'prescanning'
+                {effectiveCaptureState.status === 'prescanning'
                   ? 'Cancel AI Scan'
                   : isCapturingLive
                     ? 'Stop AI Subs'
@@ -569,8 +606,8 @@ export const Popup: React.FC = () => {
               </button>
             </div>
 
-            {captureState.status === 'error' && (
-              <div className="error-box">{captureState.message}</div>
+            {effectiveCaptureState.status === 'error' && (
+              <div className="error-box">{effectiveCaptureState.message}</div>
             )}
 
             {lastSubtitle && isCapturingLive && (

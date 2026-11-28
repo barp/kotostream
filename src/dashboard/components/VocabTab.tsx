@@ -144,9 +144,14 @@ export const VocabTab: React.FC<VocabTabProps> = ({
   };
 
   const handlePlayCardAudio = async (card: MinedCard) => {
+    const wasPlayingThis = playingCardId === card.id;
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current = null;
+    }
+    if (wasPlayingThis) {
+      setPlayingCardId(null);
+      return;
     }
     const hydrated = await hydrateMinedCard(card);
     if (!hydrated.audioBase64) {

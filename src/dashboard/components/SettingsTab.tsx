@@ -60,31 +60,41 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   onNotice,
 }) => {
   const [draft, setDraft] = useState<AppSettings>(savedSettings);
+  const [tagsInput, setTagsInput] = useState<string>(savedSettings.anki.tags.join(', '));
+  const [customTranslationModel, setCustomTranslationModel] = useState<boolean>(
+    !TRANSLATION_MODEL_PRESETS.includes(savedSettings.anki.translationModel)
+  );
+  const customModelInputRef = React.useRef<HTMLInputElement | null>(null);
   const [ankiDecks, setAnkiDecks] = useState<string[]>([]);
   const [ankiModels, setAnkiModels] = useState<string[]>([]);
   const [ankiFields, setAnkiFields] = useState<string[]>([]);
   const [ankiStatus, setAnkiStatus] = useState<string>('');
 
-  // Keep draft synced when savedSettings reloads from storage
-  React.useEffect(() => {
-    setDraft(savedSettings);
-  }, [savedSettings]);
-
   const isDirty = useMemo(
     () => JSON.stringify(draft) !== JSON.stringify(savedSettings),
     [draft, savedSettings]
   );
+  const isDirtyRef = React.useRef(isDirty);
+  isDirtyRef.current = isDirty;
+
+  // Keep draft synced when savedSettings reloads from storage, without clobbering unsaved edits
+  React.useEffect(() => {
+    if (isDirtyRef.current) return;
+    setDraft(savedSettings);
+    setTagsInput(savedSettings.anki.tags.join(', '));
+    setCustomTranslationModel(
+      !TRANSLATION_MODEL_PRESETS.includes(savedSettings.anki.translationModel)
+    );
+  }, [savedSettings]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    const parsedTags = tagsInput
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean);
     const cleaned: AppSettings = {
       ...draft,
-      stt: {
-        ...draft.stt,
-        chunkDurationMs: clampNumber(draft.stt.chunkDurationMs, 1000, 10000, 2200),
-        silenceSplitMs: clampNumber(draft.stt.silenceSplitMs, 150, 2000, 280),
-        sentenceResetPauseMs: clampNumber(draft.stt.sentenceResetPauseMs, 800, 10000, 2200),
-      },
       overlay: {
         ...draft.overlay,
         fontSizePx: clampNumber(draft.overlay.fontSizePx, 16, 52, 28),
@@ -93,11 +103,13 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       },
       anki: {
         ...draft.anki,
+        tags: parsedTags,
         screenshotQuality: clampNumber(draft.anki.screenshotQuality, 0.3, 1, 0.82),
       },
     };
     await saveSettings(cleaned);
     setDraft(cleaned);
+    setTagsInput(parsedTags.join(', '));
     onSettingsSaved(cleaned);
     onNotice('success', 'Settings saved! Changes apply immediately to active video tabs.');
   };
@@ -242,51 +254,6 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 </button>
               ))}
             </div>
-          </div>
-
-          <div className="field">
-            <label>Max Chunk Duration (ms)</label>
-            <input
-              type="number"
-              min={1000}
-              max={10000}
-              step={100}
-              value={draft.stt.chunkDurationMs}
-              onChange={(e) => {
-                const v = e.target.value === '' ? 0 : Number(e.target.value);
-                setDraft((s) => ({ ...s, stt: { ...s.stt, chunkDurationMs: v } }));
-              }}
-            />
-          </div>
-
-          <div className="field">
-            <label>Silence Split Pause (ms)</label>
-            <input
-              type="number"
-              min={150}
-              max={2000}
-              step={20}
-              value={draft.stt.silenceSplitMs}
-              onChange={(e) => {
-                const v = e.target.value === '' ? 0 : Number(e.target.value);
-                setDraft((s) => ({ ...s, stt: { ...s.stt, silenceSplitMs: v } }));
-              }}
-            />
-          </div>
-
-          <div className="field">
-            <label>Sentence Reset Pause (ms)</label>
-            <input
-              type="number"
-              min={800}
-              max={10000}
-              step={100}
-              value={draft.stt.sentenceResetPauseMs}
-              onChange={(e) => {
-                const v = e.target.value === '' ? 0 : Number(e.target.value);
-                setDraft((s) => ({ ...s, stt: { ...s.stt, sentenceResetPauseMs: v } }));
-              }}
-            />
           </div>
 
           <div className="field">
@@ -540,13 +507,17 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               <label>OpenRouter Translation Model</label>
               <select
                 value={
-                  TRANSLATION_MODEL_PRESETS.includes(draft.anki.translationModel)
+                  !customTranslationModel && TRANSLATION_MODEL_PRESETS.includes(draft.anki.translationModel)
                     ? draft.anki.translationModel
                     : '__custom__'
                 }
                 onChange={(e) => {
                   const val = e.target.value;
-                  if (val !== '__custom__') {
+                  if (val === '__custom__') {
+                    setCustomTranslationModel(true);
+                    window.requestAnimationFrame(() => customModelInputRef.current?.focus());
+                  } else {
+                    setCustomTranslationModel(false);
                     setDraft((s) => ({
                       ...s,
                       anki: { ...s.anki, translationModel: val },
@@ -562,16 +533,19 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 <option value="__custom__">Custom OpenRouter Model ID…</option>
               </select>
               <input
+                ref={customModelInputRef}
                 type="text"
                 className="mt-sm"
                 value={draft.anki.translationModel}
                 placeholder="google/gemini-2.5-flash"
-                onChange={(e) =>
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setCustomTranslationModel(!TRANSLATION_MODEL_PRESETS.includes(next));
                   setDraft((s) => ({
                     ...s,
-                    anki: { ...s.anki, translationModel: e.target.value },
-                  }))
-                }
+                    anki: { ...s.anki, translationModel: next },
+                  }));
+                }}
               />
             </div>
           )}
@@ -653,20 +627,22 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             <label>Card Tags (comma-separated)</label>
             <input
               type="text"
-              value={draft.anki.tags.join(', ')}
+              value={tagsInput}
               placeholder="kotostream, prime-video"
-              onChange={(e) =>
+              onChange={(e) => {
+                const raw = e.target.value;
+                setTagsInput(raw);
                 setDraft((s) => ({
                   ...s,
                   anki: {
                     ...s.anki,
-                    tags: e.target.value
+                    tags: raw
                       .split(',')
                       .map((t) => t.trim())
                       .filter(Boolean),
                   },
-                }))
-              }
+                }));
+              }}
             />
           </div>
         </div>
@@ -905,7 +881,17 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         )}
         <div className="row tight">
           {isDirty && (
-            <button type="button" className="btn btn-sm" onClick={() => setDraft(savedSettings)}>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => {
+                setDraft(savedSettings);
+                setTagsInput(savedSettings.anki.tags.join(', '));
+                setCustomTranslationModel(
+                  !TRANSLATION_MODEL_PRESETS.includes(savedSettings.anki.translationModel)
+                );
+              }}
+            >
               Discard Changes
             </button>
           )}

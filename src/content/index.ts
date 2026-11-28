@@ -43,7 +43,9 @@ async function init() {
       overlay.ensureMounted();
     }
     // Keep Prime Video's title/episode cache warm while player controls are visible in the DOM
-    adapter.getMediaTitle();
+    if (adapter.id === 'prime') {
+      adapter.getMediaTitle();
+    }
   };
 
   tryMount();
@@ -74,19 +76,21 @@ async function init() {
   });
 
   // Also capture Prime Video's episode header whenever the user hovers over the player (throttled)
-  let lastMetaScan = 0;
-  document.addEventListener(
-    'mousemove',
-    () => {
-      if (!chrome.runtime?.id || !isEnabled) return;
-      const now = Date.now();
-      if (now - lastMetaScan > 600) {
-        lastMetaScan = now;
-        adapter.getMediaTitle();
-      }
-    },
-    { passive: true }
-  );
+  if (adapter.id === 'prime') {
+    let lastMetaScan = 0;
+    document.addEventListener(
+      'mousemove',
+      () => {
+        if (!chrome.runtime?.id || !isEnabled) return;
+        const now = Date.now();
+        if (now - lastMetaScan > 600) {
+          lastMetaScan = now;
+          adapter.getMediaTitle();
+        }
+      },
+      { passive: true }
+    );
+  }
 
   // Sync initial capture state from background worker
   if (chrome.runtime?.id) {

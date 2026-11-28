@@ -70,6 +70,9 @@ export class OverlayManager {
   private browserWindowRange: { start: number; end: number } | null = null;
   private browserFollowLive = true;
   private browserLinesCache: SubtitleLine[] | null = null;
+  private browserLinesById = new Map<string, SubtitleLine>();
+  private browserTokenObserver: IntersectionObserver | null = null;
+  private toolbarCollapsed = false;
 
   private activeToken: Token | null = null;
   /** Cue id of the line the open popover's word belongs to (keeps ks-selected across re-renders) */
@@ -87,6 +90,7 @@ export class OverlayManager {
 
   // DOM refs inside Shadow DOM
   private toolbarEl!: HTMLDivElement;
+  private toolbarToggleBtn!: HTMLButtonElement;
   private dotEl!: HTMLSpanElement;
   private toggleCaptureBtn!: HTMLButtonElement;
   private furiganaBtn!: HTMLButtonElement;
@@ -129,23 +133,27 @@ export class OverlayManager {
     this.toolbarEl = document.createElement('div');
     this.toolbarEl.className = 'ks-toolbar';
     this.toolbarEl.innerHTML = `
-      <span class="ks-brand"><span class="ks-dot"></span>KotoStream</span>
-      <button class="ks-btn ks-btn-primary" data-action="toggle-capture" title="Silently pre-scan episode at 4x to generate Japanese subtitles">AI Pre-Scan</button>
-      <button class="ks-btn" data-action="toggle-furigana" title="Cycle Furigana mode">振り仮名</button>
-      <button class="ks-btn" data-action="toggle-library" title="Saved Subtitle Library &amp; Jimaku">Library</button>
-      <button class="ks-btn" data-action="load-file" title="Load .srt, .vtt, or .ass Japanese subtitles">Load Sub</button>
-      <span class="ks-sync-group" style="display:none;align-items:center;gap:4px">
-        <button class="ks-btn" data-action="sync-minus" title="Show subtitles 0.5s earlier">-0.5s</button>
-        <button class="ks-btn" data-action="sync-reset" title="Click to reset sync offset to 0s">0.0s</button>
-        <button class="ks-btn" data-action="sync-plus" title="Delay subtitles by 0.5s">+0.5s</button>
+      <span class="ks-brand" data-action="brand-click" title="KotoStream (Alt+H to collapse/expand)"><span class="ks-dot"></span>KotoStream</span>
+      <span class="ks-toolbar-controls">
+        <button class="ks-btn ks-btn-primary" data-action="toggle-capture" title="Silently pre-scan episode at 4x to generate Japanese subtitles">AI Pre-Scan</button>
+        <button class="ks-btn" data-action="toggle-furigana" title="Cycle Furigana mode (Alt+F)">振り仮名</button>
+        <button class="ks-btn" data-action="toggle-library" title="Saved Subtitle Library &amp; Jimaku">Library</button>
+        <button class="ks-btn" data-action="load-file" title="Load .srt, .vtt, or .ass Japanese subtitles">Load Sub</button>
+        <span class="ks-sync-group" style="display:none;align-items:center;gap:4px">
+          <button class="ks-btn" data-action="sync-minus" title="Show subtitles 0.5s earlier">-0.5s</button>
+          <button class="ks-btn" data-action="sync-reset" title="Click to reset sync offset to 0s">0.0s</button>
+          <button class="ks-btn" data-action="sync-plus" title="Delay subtitles by 0.5s">+0.5s</button>
+        </span>
+        <button class="ks-btn" data-action="toggle-sidebar" title="Subtitle browser — browse past &amp; upcoming lines (Alt+S)">Subtitles</button>
+        <button class="ks-btn" data-action="open-settings" title="Settings &amp; Anki">⚙</button>
+        <span class="ks-status-pill"></span>
       </span>
-      <button class="ks-btn" data-action="toggle-sidebar" title="Subtitle browser — browse past &amp; upcoming lines">Subtitles</button>
-      <button class="ks-btn" data-action="open-settings" title="Settings &amp; Anki">⚙</button>
-      <span class="ks-status-pill"></span>
+      <button class="ks-btn ks-btn-icon" data-action="toggle-toolbar" title="Collapse toolbar (Alt+H)" aria-label="Collapse toolbar">▸</button>
     `;
     this.shadow.appendChild(this.toolbarEl);
 
     this.dotEl = this.toolbarEl.querySelector('.ks-dot')!;
+    this.toolbarToggleBtn = this.toolbarEl.querySelector('[data-action="toggle-toolbar"]')!;
     this.toggleCaptureBtn = this.toolbarEl.querySelector('[data-action="toggle-capture"]')!;
     this.furiganaBtn = this.toolbarEl.querySelector('[data-action="toggle-furigana"]')!;
     this.syncGroupEl = this.toolbarEl.querySelector('.ks-sync-group')!;
@@ -204,6 +212,7 @@ export class OverlayManager {
       captureScreenshot: () => this.captureVideoFrame(),
       commitDraft: (draft) => this.commitCardDraft(draft),
       showToast: (msg) => this.showToast(msg),
+      onClose: () => this.handleCardModalClose(),
     });
 
     this.bindEvents();
@@ -217,10 +226,107 @@ export class OverlayManager {
   };
 
   private handleDocumentKeyDown = (e: KeyboardEvent) => {
-    if (e.key === 'Escape' && !this.cardModal.isOpen && this.popoverEl.classList.contains('ks-open')) {
+    if (!this.settings.enabled || this.cardModal.isOpen) return;
+
+    if (e.key === 'Escape' && this.popoverEl.classList.contains('ks-open')) {
       this.closePopover();
+      return;
+    }
+
+    if (!e.altKey || e.ctrlKey || e.metaKey) return;
+
+    const target = e.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT' ||
+        target.isContentEditable)
+    ) {
+      return;
+    }
+
+    switch (e.code) {
+      case 'KeyF':
+        e.preventDefault();
+        void this.cycleFuriganaMode();
+        break;
+      case 'KeyS':
+        e.preventDefault();
+        this.toggleSubtitleBrowser();
+        break;
+      case 'KeyH':
+        e.preventDefault();
+        this.toggleToolbarCollapsed();
+        break;
+      case 'KeyR':
+        e.preventDefault();
+        this.replayCurrentSubtitle();
+        break;
+      case 'BracketLeft':
+        e.preventDefault();
+        this.jumpRelativeCue(-1);
+        break;
+      case 'BracketRight':
+        e.preventDefault();
+        this.jumpRelativeCue(1);
+        break;
     }
   };
+
+  private toggleToolbarCollapsed(force?: boolean) {
+    this.toolbarCollapsed = force ?? !this.toolbarCollapsed;
+    this.toolbarEl.classList.toggle('ks-collapsed', this.toolbarCollapsed);
+    this.toolbarToggleBtn.textContent = this.toolbarCollapsed ? '◂' : '▸';
+    const label = this.toolbarCollapsed ? 'Expand toolbar (Alt+H)' : 'Collapse toolbar (Alt+H)';
+    this.toolbarToggleBtn.title = label;
+    this.toolbarToggleBtn.setAttribute('aria-label', label);
+  }
+
+  private toggleSubtitleBrowser() {
+    if (this.sidebarEl.classList.contains('ks-open') && this.sidebarMode === 'browser') {
+      this.sidebarEl.classList.remove('ks-open');
+    } else {
+      this.sidebarMode = 'browser';
+      this.sidebarEl.classList.add('ks-open');
+      this.renderSubtitleBrowser();
+    }
+  }
+
+  private jumpRelativeCue(delta: -1 | 1) {
+    if (!this.video || this.loadedFileSubtitles.length === 0) return;
+    const lines = this.loadedFileSubtitles;
+    const curIdx = this.getBrowserActiveIdx(lines);
+    const nextIdx = Math.max(0, Math.min(lines.length - 1, curIdx + delta));
+    const cue = lines[nextIdx];
+    if (cue && cue.videoTimeSec !== undefined) {
+      this.browserActiveIds = new Set([cue.id]);
+      this.video.currentTime = Math.max(0, cue.videoTimeSec + this.subtitleOffsetSec);
+      if (this.sidebarEl.classList.contains('ks-open') && this.sidebarMode === 'browser') {
+        this.updateBrowserActive();
+      }
+    }
+  }
+
+  private replayCurrentSubtitle() {
+    if (!this.video) return;
+    const startSec = this.currentSubtitle?.videoTimeSec;
+    if (startSec !== undefined && this.currentSubtitle?.source === 'file') {
+      this.video.currentTime = Math.max(0, startSec + this.subtitleOffsetSec);
+      if (this.video.paused) {
+        void this.video.play().catch(() => {});
+      }
+    } else if (this.loadedFileSubtitles.length > 0) {
+      const idx = this.getBrowserActiveIdx(this.loadedFileSubtitles);
+      const cue = this.loadedFileSubtitles[idx];
+      if (cue?.videoTimeSec !== undefined) {
+        this.video.currentTime = Math.max(0, cue.videoTimeSec + this.subtitleOffsetSec);
+        if (this.video.paused) {
+          void this.video.play().catch(() => {});
+        }
+      }
+    }
+  }
 
   private attachDocumentListeners() {
     if (this.docListenersAttached) return;
@@ -259,12 +365,14 @@ export class OverlayManager {
           }
           break;
         case 'toggle-sidebar':
-          if (this.sidebarEl.classList.contains('ks-open') && this.sidebarMode === 'browser') {
-            this.sidebarEl.classList.remove('ks-open');
-          } else {
-            this.sidebarMode = 'browser';
-            this.sidebarEl.classList.add('ks-open');
-            this.renderSubtitleBrowser();
+          this.toggleSubtitleBrowser();
+          break;
+        case 'toggle-toolbar':
+          this.toggleToolbarCollapsed();
+          break;
+        case 'brand-click':
+          if (this.toolbarCollapsed) {
+            this.toggleToolbarCollapsed(false);
           }
           break;
         case 'sync-minus':
@@ -306,7 +414,8 @@ export class OverlayManager {
       }
       const item = target.closest<HTMLElement>('.ks-history-item');
       if (item?.dataset.subId) {
-        const cue = this.getBrowserLines().find((s) => s.id === item.dataset.subId);
+        this.getBrowserLines();
+        const cue = this.browserLinesById.get(item.dataset.subId);
         if (cue) {
           if (cue.videoTimeSec !== undefined && this.video) {
             this.browserActiveIds = new Set([cue.id]);
@@ -413,6 +522,10 @@ export class OverlayManager {
     if (this.toastTimer) {
       clearTimeout(this.toastTimer);
       this.toastTimer = null;
+    }
+    if (this.browserTokenObserver) {
+      this.browserTokenObserver.disconnect();
+      this.browserTokenObserver = null;
     }
     this.closePopover();
     this.cardModal.close();
@@ -904,9 +1017,10 @@ export class OverlayManager {
           this.renderCurrentSubtitle();
         }
         if (browserPatch && browserPatch.container.isConnected) {
-          const cue = this.getBrowserLines().find((c) => c.id === browserPatch.cueId);
+          this.getBrowserLines();
+          const cue = this.browserLinesById.get(browserPatch.cueId);
           if (cue) {
-            this.renderBrowserLineTokens(cue, browserPatch.container);
+            this.renderBrowserLineTokens(cue, browserPatch.container, false);
           }
         }
       }
@@ -987,14 +1101,22 @@ export class OverlayManager {
     );
 
     const anchorTop = fromPanel ? tokenRect.top : Math.min(tokenRect.top, subRect.top);
-    const bottomPx = Math.max(12, window.innerHeight - anchorTop + 12);
-    const maxHeightPx = Math.max(180, anchorTop - 24);
+    const spaceAbove = anchorTop - 24;
+    const spaceBelow = window.innerHeight - tokenRect.bottom - 24;
 
     this.popoverEl.style.left = `${left}px`;
-    this.popoverEl.style.top = 'auto';
-    this.popoverEl.style.bottom = `${bottomPx}px`;
-    this.popoverEl.style.maxHeight = `${maxHeightPx}px`;
     this.popoverEl.style.overflowY = 'auto';
+
+    if (fromPanel && spaceAbove < 240 && spaceBelow > spaceAbove) {
+      this.popoverEl.style.top = `${Math.max(12, tokenRect.bottom + 10)}px`;
+      this.popoverEl.style.bottom = 'auto';
+      this.popoverEl.style.maxHeight = `${Math.max(180, spaceBelow)}px`;
+    } else {
+      const bottomPx = Math.max(12, window.innerHeight - anchorTop + 12);
+      this.popoverEl.style.top = 'auto';
+      this.popoverEl.style.bottom = `${bottomPx}px`;
+      this.popoverEl.style.maxHeight = `${Math.max(180, spaceAbove)}px`;
+    }
   }
 
   private async openPopoverForToken(token: Token, anchorEl: HTMLElement, fromPanel = false) {
@@ -1207,8 +1329,10 @@ export class OverlayManager {
       }
     }
 
+    // subtitleHistory is stored newest-first (unshift), so slice from index 0 and reverse to chronological order
     const historyBefore = this.subtitleHistory
-      .slice(-4)
+      .slice(0, 4)
+      .reverse()
       .map((c) => cleanLine(c.text))
       .filter((l) => l && l !== targetClean)
       .slice(-3);
@@ -1285,7 +1409,14 @@ export class OverlayManager {
         .map((s) => s.definitions.slice(0, 3).join('; '))
         .join('\n') || '(No definition)';
 
+    if (this.hoverCloseTimer) {
+      clearTimeout(this.hoverCloseTimer);
+      this.hoverCloseTimer = null;
+    }
     this.popoverEl.classList.remove('ks-open');
+    this.shadow.querySelectorAll('.ks-selected').forEach((el) => el.classList.remove('ks-selected'));
+    this.activeToken = null;
+    this.activePopoverCueId = null;
 
     const draft: CardDraft = {
       word,
@@ -1326,6 +1457,7 @@ export class OverlayManager {
       draft.translation = transRes.translation;
       draft.translating = false;
       await this.commitCardDraft(draft);
+      this.resumeVideoIfPausedByOverlay();
       return;
     }
 
@@ -1381,7 +1513,19 @@ export class OverlayManager {
     }
   }
 
+  private resumeVideoIfPausedByOverlay() {
+    if (this.pausedByOverlay && this.settings.overlay.autoResumeOnLeave && this.video?.paused) {
+      void this.video.play().catch(() => {});
+    }
+    this.pausedByOverlay = false;
+  }
+
+  private handleCardModalClose() {
+    this.resumeVideoIfPausedByOverlay();
+  }
+
   private schedulePopoverClose() {
+    if (this.cardModal.isOpen) return;
     if (this.hoverCloseTimer) clearTimeout(this.hoverCloseTimer);
     this.hoverCloseTimer = window.setTimeout(() => {
       this.closePopover();
@@ -1389,15 +1533,20 @@ export class OverlayManager {
   }
 
   private closePopover() {
+    if (this.cardModal.isOpen) return;
+    if (this.hoverCloseTimer) {
+      clearTimeout(this.hoverCloseTimer);
+      this.hoverCloseTimer = null;
+    }
+    const wasOpen = this.popoverEl.classList.contains('ks-open');
     this.popoverEl.classList.remove('ks-open');
     this.shadow.querySelectorAll('.ks-selected').forEach((el) => el.classList.remove('ks-selected'));
     this.activeToken = null;
     this.activePopoverCueId = null;
 
-    if (this.pausedByOverlay && this.settings.overlay.autoResumeOnLeave && this.video?.paused) {
-      void this.video.play().catch(() => {});
+    if (wasOpen) {
+      this.resumeVideoIfPausedByOverlay();
     }
-    this.pausedByOverlay = false;
   }
 
   private async toggleLiveCapture() {
@@ -1447,6 +1596,10 @@ export class OverlayManager {
       this.loadedFileSubtitles.length > 0
         ? this.loadedFileSubtitles
         : [...this.subtitleHistory].reverse();
+    this.browserLinesById.clear();
+    for (const cue of this.browserLinesCache) {
+      this.browserLinesById.set(cue.id, cue);
+    }
     return this.browserLinesCache;
   }
 
@@ -1523,10 +1676,51 @@ export class OverlayManager {
     this.sidebarListEl.innerHTML = '';
     this.sidebarListEl.appendChild(frag);
 
-    for (const { cue, el } of lineContainers) {
+    if (this.browserTokenObserver) {
+      this.browserTokenObserver.disconnect();
+      this.browserTokenObserver = null;
+    }
+
+    const lazyTargets: Array<{ cue: SubtitleLine; el: HTMLElement; textEl: HTMLElement }> = [];
+    const activeRelIdx = activeIdx - start;
+
+    for (let i = 0; i < lineContainers.length; i++) {
+      const { cue, el } = lineContainers[i];
       const textEl = el.querySelector<HTMLElement>('.ks-history-text')!;
-      const tokens = this.renderBrowserLineTokens(cue, textEl);
-      allTokens.push(...tokens);
+      const nearActive = Math.abs(i - activeRelIdx) <= 10;
+      const tokens = this.renderBrowserLineTokens(cue, textEl, nearActive);
+      if (Math.abs(i - activeRelIdx) <= 6) {
+        allTokens.push(...tokens);
+      }
+      if (!nearActive) {
+        lazyTargets.push({ cue, el, textEl });
+      }
+    }
+
+    if (lazyTargets.length > 0 && typeof IntersectionObserver !== 'undefined') {
+      const targetMap = new Map<Element, { cue: SubtitleLine; textEl: HTMLElement }>();
+      this.browserTokenObserver = new IntersectionObserver(
+        (entries, obs) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            const info = targetMap.get(entry.target);
+            obs.unobserve(entry.target);
+            if (!info) continue;
+            const lineText = info.cue.text.replace(/\n/g, ' ').trim();
+            if (lineText && !this.morphemeCache.has(lineText)) {
+              this.requestMeCabTokenization(lineText, undefined, {
+                cueId: info.cue.id,
+                container: info.textEl,
+              });
+            }
+          }
+        },
+        { root: this.sidebarListEl, rootMargin: '240px 0px' }
+      );
+      for (const item of lazyTargets) {
+        targetMap.set(item.el, { cue: item.cue, textEl: item.textEl });
+        this.browserTokenObserver.observe(item.el);
+      }
     }
 
     this.prefetchSubtitleWords(allTokens);
@@ -1538,7 +1732,11 @@ export class OverlayManager {
     if (followBtn) followBtn.style.display = this.browserFollowLive ? 'none' : 'flex';
   }
 
-  private renderBrowserLineTokens(cue: SubtitleLine, textEl: HTMLElement): Token[] {
+  private renderBrowserLineTokens(
+    cue: SubtitleLine,
+    textEl: HTMLElement,
+    requestMeCab = true
+  ): Token[] {
     const lineText = cue.text.replace(/\n/g, ' ').trim();
     textEl.innerHTML = '';
     if (!lineText) return [];
@@ -1553,7 +1751,7 @@ export class OverlayManager {
         )
       : tokenizeJapanese(lineText, this.vocabMap, this.readingCache, this.verifiedCompounds);
 
-    if (!cachedMorphemes) {
+    if (!cachedMorphemes && requestMeCab) {
       this.requestMeCabTokenization(lineText, undefined, { cueId: cue.id, container: textEl });
     }
 
@@ -1697,11 +1895,11 @@ export class OverlayManager {
     for (const item of items) {
       const cueId = item.dataset.subId;
       if (!cueId) continue;
-      const cue = lines.find((c) => c.id === cueId);
+      const cue = this.browserLinesById.get(cueId);
       if (!cue || !cue.text.replace(/\n/g, '').includes(compound)) continue;
       const textEl = item.querySelector<HTMLElement>('.ks-history-text');
       if (textEl) {
-        this.renderBrowserLineTokens(cue, textEl);
+        this.renderBrowserLineTokens(cue, textEl, false);
       }
     }
   }
@@ -1716,7 +1914,7 @@ export class OverlayManager {
       const cueId = item.dataset.subId;
       const textEl = item.querySelector<HTMLElement>('.ks-history-text');
       if (!cueId || !textEl) continue;
-      const cue = lines.find((c) => c.id === cueId);
+      const cue = this.browserLinesById.get(cueId);
       if (!cue) continue;
 
       const lineText = cue.text.replace(/\n/g, ' ').trim();
@@ -1737,7 +1935,7 @@ export class OverlayManager {
           return !m || m[1] !== t.status;
         });
       if (changed) {
-        this.renderBrowserLineTokens(cue, textEl);
+        this.renderBrowserLineTokens(cue, textEl, false);
       }
     }
   }

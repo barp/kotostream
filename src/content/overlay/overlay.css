@@ -37,6 +37,20 @@
   opacity: 1;
 }
 
+.ks-toolbar-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ks-toolbar.ks-collapsed {
+  padding: 5px 8px;
+}
+
+.ks-toolbar.ks-collapsed .ks-toolbar-controls {
+  display: none;
+}
+
 .ks-brand {
   font-size: 12px;
   font-weight: 700;
@@ -46,6 +60,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  cursor: pointer;
 }
 
 .ks-dot {
@@ -319,6 +334,8 @@
   max-height: 165px;
   overflow-y: auto;
   padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
 }
 
 .ks-sense {
@@ -424,10 +441,19 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding: 12px 14px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.16);
   font-size: 13px;
   font-weight: 700;
+}
+
+.ks-sidebar-header > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
 }
 
 .ks-sidebar-list {
@@ -437,6 +463,8 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
 }
 
 .ks-history-item {
@@ -599,6 +627,8 @@
   gap: 0;
   overflow-y: auto;
   flex: 1;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
 }
 
 @media (max-width: 780px) {
@@ -622,6 +652,8 @@
   flex-direction: column;
   gap: 10px;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
 }
 
 .ks-field-row {

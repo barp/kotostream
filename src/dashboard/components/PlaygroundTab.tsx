@@ -182,7 +182,12 @@ export const PlaygroundTab: React.FC<PlaygroundTabProps> = ({
         <input
           type="text"
           value={pgText}
-          onChange={(e) => setPgText(e.target.value)}
+          onChange={(e) => {
+            setPgText(e.target.value);
+            setPgSelectedToken(null);
+            setPgEntry(null);
+            setPgTranslation('');
+          }}
           placeholder="Type or paste any Japanese sentence…"
         />
       </div>
