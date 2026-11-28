@@ -19,7 +19,7 @@ import {
 } from '../types';
 import {
   addMinedCard,
-  bulkImportKnownWords,
+  bulkImportVocabEntries,
   deleteMinedCard,
   deleteSubtitleTrack,
   getMinedCards,
@@ -33,6 +33,13 @@ import {
 } from '../core/storage';
 import { formatSubtitlesToSrt, parseSubtitleFile } from '../core/subtitle-parser';
 import { preTranscribeMediaFile } from '../core/batch-transcribe';
+import {
+  type ImportableStatus,
+  type MigakuImportEntry,
+  mergeMigakuEntries,
+  parseMigakuExport,
+  parseMigakuFile,
+} from '../core/migaku-import';
 import { formatIntervalPreview, scheduleReview, type ReviewRating } from '../core/srs';
 import {
   buildAnkiFieldPreview,
@@ -106,7 +113,14 @@ export const Dashboard: React.FC = () => {
   // Vocab state
   const [vocabSearch, setVocabSearch] = useState('');
   const [vocabFilter, setVocabFilter] = useState<'all' | WordStatus>('all');
-  const [bulkInput, setBulkInput] = useState('');
+  const [migakuPaste, setMigakuPaste] = useState('');
+  const [migakuFallback, setMigakuFallback] = useState<ImportableStatus>('known');
+  const [migakuDragOver, setMigakuDragOver] = useState(false);
+  const [migakuPending, setMigakuPending] = useState<{
+    entries: MigakuImportEntry[];
+    skipped: number;
+    sourceLabel: string;
+  } | null>(null);
 
   // Anki discovery state
   const [ankiDecks, setAnkiDecks] = useState<string[]>([]);
@@ -126,6 +140,17 @@ export const Dashboard: React.FC = () => {
   const showNotice = (type: 'success' | 'error', text: string) => {
     setBanner({ type, text });
     window.setTimeout(() => setBanner(null), 4500);
+  };
+
+  // Migaku import feedback lives INLINE in the import panel (right under the Import button)
+  // so users pressing a button at the bottom of the page see the result where they act.
+  const [migakuNotice, setMigakuNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const migakuNoticeRef = React.useRef<HTMLDivElement | null>(null);
+  const setMigakuFeedback = (type: 'success' | 'error', text: string) => {
+    setMigakuNotice({ type, text });
+    window.setTimeout(() => {
+      migakuNoticeRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }, 60);
   };
 
   const reloadAll = async () => {
@@ -431,16 +456,96 @@ export const Dashboard: React.FC = () => {
     URL.revokeObjectURL(url);
   };
 
-  const handleBulkImport = async () => {
-    const words = bulkInput
-      .split(/[\n,、\t]+/)
-      .map((w) => w.trim())
-      .filter(Boolean);
-    if (words.length === 0) return;
-    const count = await bulkImportKnownWords(words);
-    setBulkInput('');
+  const handleMigakuFileList = async (files: File[]) => {
+    if (files.length === 0) return;
+    const entryLists: MigakuImportEntry[][] = [];
+    let skipped = 0;
+    const labels: string[] = [];
+    const errors: string[] = [];
+    for (const file of files) {
+      try {
+        const data = new Uint8Array(await file.arrayBuffer());
+        const parsed = await parseMigakuFile({ name: file.name, data }, migakuFallback);
+        for (const { name, result } of parsed) {
+          if (result.entries.length === 0) {
+            errors.push(`“${name}”: ${result.error ?? 'No importable Japanese words found.'}`);
+            continue;
+          }
+          entryLists.push(result.entries);
+          skipped += result.skipped;
+          labels.push(name);
+        }
+      } catch {
+        errors.push(`Could not read “${file.name}”.`);
+      }
+    }
+    if (entryLists.length === 0) {
+      setMigakuFeedback('error', errors.join('\n') || 'No importable Japanese words found.');
+      return;
+    }
+    if (errors.length > 0) {
+      setMigakuFeedback('error', `Some files could not be read:\n${errors.join('\n')}`);
+    } else {
+      setMigakuNotice(null);
+    }
+    setMigakuPending({
+      entries: mergeMigakuEntries(entryLists),
+      skipped,
+      sourceLabel: labels.join(', '),
+    });
+  };
+
+  const handleMigakuFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    await handleMigakuFileList(Array.from(e.target.files ?? []));
+    e.target.value = '';
+  };
+
+  const handleMigakuDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setMigakuDragOver(false);
+    await handleMigakuFileList(Array.from(e.dataTransfer.files ?? []));
+  };
+
+  const handleMigakuImport = async () => {
+    let pending = migakuPending;
+    if (!pending && migakuPaste.trim()) {
+      const res = parseMigakuExport(migakuPaste, { fallbackStatus: migakuFallback });
+      if (res.entries.length === 0) {
+        setMigakuFeedback('error', res.error ?? 'No importable Japanese words found in the pasted text.');
+        return;
+      }
+      pending = { entries: res.entries, skipped: res.skipped, sourceLabel: 'pasted text' };
+    }
+    if (!pending || pending.entries.length === 0) {
+      setMigakuFeedback('error', 'Pick a Migaku export file (or paste one) first.');
+      return;
+    }
+    const res = await bulkImportVocabEntries(pending.entries);
+    if (!res.persisted) {
+      // Keep the pending preview so the user can retry immediately after fixing storage
+      setMigakuFeedback('error', `Could not save the import: ${res.error ?? 'storage write failed.'}`);
+      return;
+    }
+    const { added, updated } = res;
+    setMigakuPending(null);
+    setMigakuPaste('');
     await reloadAll();
-    showNotice('success', `Marked ${count} words as Known.`);
+    const b = { known: 0, learning: 0, ignored: 0 };
+    for (const entry of pending.entries) b[entry.status]++;
+    const parts = [
+      b.known ? `${b.known} known` : '',
+      b.learning ? `${b.learning} learning` : '',
+      b.ignored ? `${b.ignored} ignored` : '',
+    ].filter(Boolean);
+    // Read back the verified total so the success message matches the Vocab table exactly
+    const finalMap = await getVocabMap();
+    const total = Object.keys(finalMap).length;
+    setMigakuFeedback(
+      'success',
+      `Imported ${added + updated} words (${added} new, ${updated} updated): ${parts.join(
+        ' · '
+      )}. Vocabulary now tracks ${total} words in total — subtitles update live.`
+    );
   };
 
   const handleVocabStatusChange = async (word: string, status: WordStatus) => {
@@ -1008,7 +1113,7 @@ export const Dashboard: React.FC = () => {
                   padding: '7px 10px',
                 }}
               />
-              {(['all', 'known', 'learning', 'unknown'] as const).map((f) => (
+              {(['all', 'known', 'learning', 'ignored', 'unknown'] as const).map((f) => (
                 <button
                   key={f}
                   className={`btn btn-sm ${vocabFilter === f ? 'btn-primary' : ''}`}
@@ -1056,21 +1161,90 @@ export const Dashboard: React.FC = () => {
           </div>
 
           <div className="panel">
-            <h2>Bulk Import Known Words</h2>
-            <p className="panel-desc">Paste words you already know (one per line or comma-separated) to hide their underlines & furigana.</p>
-            <div className="field">
+            <h2>Import from Migaku</h2>
+            <p className="panel-desc">
+              Drop or upload <strong>any</strong> Migaku word export — .json, .csv, .txt, .tsv, .gz, or the .zip from
+              “Export wordlists”. The format and statuses (<strong>Known</strong> / <strong>Learning</strong> /{' '}
+              <strong>Ignored</strong>) are detected automatically from the file contents, and imported words apply
+              live to subtitle underlines and the browser panel.
+            </p>
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setMigakuDragOver(true);
+              }}
+              onDragLeave={() => setMigakuDragOver(false)}
+              onDrop={(e) => void handleMigakuDrop(e)}
+              style={{
+                border: migakuDragOver ? '2px dashed rgba(59,130,246,0.9)' : '1px dashed rgba(148,163,184,0.4)',
+                borderRadius: 10,
+                padding: '18px 14px',
+                textAlign: 'center',
+                background: migakuDragOver ? 'rgba(59,130,246,0.08)' : 'transparent',
+                transition: 'border 120ms, background 120ms',
+              }}
+            >
+              <div style={{ color: '#cbd5e1', marginBottom: 10 }}>
+                {migakuDragOver
+                  ? 'Drop the files to load them…'
+                  : 'Drag & drop your Migaku export here (or browse) — multiple files OK, zips included'}
+              </div>
+              <input
+                type="file"
+                multiple
+                onChange={(e) => void handleMigakuFiles(e)}
+                style={{ background: '#0b1120', border: '1px solid rgba(148,163,184,0.24)', color: '#f1f5f9', borderRadius: 8, padding: '6px 10px' }}
+              />
+              <div className="row" style={{ marginTop: 10, justifyContent: 'center', gap: 10, alignItems: 'center' }}>
+                <span style={{ color: '#94a3b8', fontSize: 13 }}>Word lists with no statuses import as</span>
+                <select
+                  value={migakuFallback}
+                  onChange={(e) => setMigakuFallback(e.target.value as ImportableStatus)}
+                  style={{ background: '#0b1120', border: '1px solid rgba(148,163,184,0.24)', color: '#f1f5f9', borderRadius: 8, padding: '7px 10px' }}
+                >
+                  <option value="known">Known</option>
+                  <option value="learning">Learning</option>
+                  <option value="ignored">Ignored</option>
+                </select>
+              </div>
+            </div>
+            <div className="field" style={{ marginTop: 12 }}>
+              <label>…or paste words / CSV / JSON directly</label>
               <textarea
-                rows={4}
-                placeholder="今日&#10;食べる&#10;友達"
-                value={bulkInput}
-                onChange={(e) => setBulkInput(e.target.value)}
+                rows={5}
+                placeholder={'食べる,たべる,ja,KNOWN\n今日,きょう,ja,IGNORED\n\n…or one word per line (they get the status chosen above)'}
+                value={migakuPaste}
+                onChange={(e) => setMigakuPaste(e.target.value)}
               />
             </div>
+            {migakuPending && (
+              <div
+                className="row"
+                style={{ marginTop: 10, gap: 10, alignItems: 'center', background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.35)', borderRadius: 8, padding: '8px 12px' }}
+              >
+                <span style={{ color: '#bfdbfe' }}>
+                  Ready: <strong>{migakuPending.entries.length}</strong> words from {migakuPending.sourceLabel}
+                  {migakuPending.skipped > 0 ? ` · ${migakuPending.skipped} skipped` : ''}
+                </span>
+                <button className="btn btn-sm" onClick={() => setMigakuPending(null)}>
+                  Clear
+                </button>
+              </div>
+            )}
             <div style={{ marginTop: 10 }}>
-              <button className="btn btn-primary" onClick={handleBulkImport}>
-                Import as Known
+              <button className="btn btn-primary" onClick={() => void handleMigakuImport()}>
+                {migakuPending ? `Import ${migakuPending.entries.length} words` : 'Import to Vocab'}
               </button>
             </div>
+            {migakuNotice && (
+              <div
+                ref={migakuNoticeRef}
+                className={`inline-notice ${migakuNotice.type}`}
+                style={{ whiteSpace: 'pre-line' }}
+              >
+                {migakuNotice.text}
+              </div>
+            )}
           </div>
         </div>
       )}

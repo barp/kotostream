@@ -76,7 +76,10 @@ function resetVideoSyncState() {
  *   after the line ended.
  * - Reports `coverage` (`hasStart`, `hasEnd`) so the overlay can silently capture any missing tail/start
  *   if the user paused mid-sentence before listening to the end!
- * - Falls back to scanning the full buffer for the most recent `requestedDurationMs` of speech.
+ * - IMPORTANT: when the ring does NOT cover the requested window (e.g. the user seeked back to a line
+ *   that hasn't re-played yet), NO audio is returned — never "recent speech" audio, which would put a
+ *   completely different sentence on the card. The content script re-captures the missing audio instead.
+ * - Without cue timestamps (live STT), falls back to scanning the buffer for the most recent speech.
  */
 function sliceRecentAudioWav(
   requestedDurationMs = 4500,
@@ -88,21 +91,25 @@ function sliceRecentAudioWav(
   durationSec?: number;
   coverage?: AudioRangeCoverage;
 } {
-  let sliced: Int16Array | null = null;
-  let coverage: AudioRangeCoverage | undefined;
-
-  if (
+  const hasRange =
     startTimeSec !== undefined &&
     endTimeSec !== undefined &&
     Number.isFinite(startTimeSec) &&
     Number.isFinite(endTimeSec) &&
-    endTimeSec > startTimeSec
-  ) {
+    endTimeSec > startTimeSec;
+
+  let sliced: Int16Array | null = null;
+  let coverage: AudioRangeCoverage | undefined;
+
+  if (hasRange) {
     coverage = audioRing.getCoverage(startTimeSec, endTimeSec, 0.2);
     sliced = audioRing.sliceByTimeRange(startTimeSec, endTimeSec, 0.25, 0.25);
-  }
-
-  if (!sliced) {
+    if (!sliced) {
+      // Exact window unavailable in the ring — return the coverage report only so the
+      // overlay silently re-captures this cue instead of attaching unrelated audio.
+      return { coverage };
+    }
+  } else {
     sliced = audioRing.sliceRecent(requestedDurationMs);
   }
 

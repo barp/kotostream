@@ -46,6 +46,15 @@ async function storageSet(items: Record<string, unknown>): Promise<void> {
   }
 }
 
+/**
+ * Like storageSet but SURFACES write failures (quota, context invalidated, …).
+ * Use for critical bulk writes where a silent failure would report fake success.
+ */
+async function storageSetStrict(items: Record<string, unknown>): Promise<void> {
+  if (!hasChromeStorage()) return; // test/non-extension environments: nothing to persist
+  await chrome.storage.local.set(items);
+}
+
 export async function getSettings(): Promise<AppSettings> {
   const saved = await storageGet<Partial<AppSettings>>(STORAGE_KEYS.SETTINGS, {});
   const hasApiKey = Boolean(saved.stt?.apiKey?.trim());
@@ -109,27 +118,93 @@ export async function setWordStatus(
 }
 
 export async function bulkImportKnownWords(words: string[]): Promise<number> {
+  const { added, updated } = await bulkImportVocabEntries(
+    words.map((word) => ({ word, status: 'known' as WordStatus }))
+  );
+  return added + updated;
+}
+
+export interface BulkVocabEntry {
+  word: string;
+  status: WordStatus;
+  reading?: string;
+}
+
+/**
+ * Merges a Migaku export (known / learning / ignored words) into the vocab tracker.
+ * Existing entries keep their reading, meaning, encounters, and firstSeenAt — only the status
+ * changes (the import wins, since the exported list is the source of truth).
+ *
+ * The write is VERIFIED: `persisted: true` only when chrome.storage.local actually holds the
+ * merged map afterwards (a quota-exceeded rejection previously caused a fake "Imported 11k"
+ * toast while nothing was saved!). Callers MUST check `persisted` before reporting success.
+ */
+export async function bulkImportVocabEntries(entries: BulkVocabEntry[]): Promise<{
+  added: number;
+  updated: number;
+  persisted: boolean;
+  error?: string;
+}> {
   const vocab = await getVocabMap();
   const now = Date.now();
   let added = 0;
-  for (const raw of words) {
-    const word = raw.trim();
-    if (!word) continue;
-    if (!vocab[word] || vocab[word].status !== 'known') {
-      vocab[word] = {
-        word,
-        reading: vocab[word]?.reading ?? '',
-        meaning: vocab[word]?.meaning ?? '',
-        status: 'known',
-        encounters: vocab[word]?.encounters ?? 1,
-        firstSeenAt: vocab[word]?.firstSeenAt ?? now,
-        updatedAt: now,
-      };
+  let updated = 0;
+
+  for (const { word: rawWord, status, reading } of entries) {
+    const word = rawWord.trim();
+    if (!word || status === 'unknown') continue; // 'unknown' is KotoStream's default state
+    const existing = vocab[word];
+    const readingChanged =
+      !existing?.reading && typeof reading === 'string' && reading.trim().length > 0;
+    const statusChanged = !existing || existing.status !== status;
+    if (!existing) {
       added++;
+    } else if (statusChanged || readingChanged) {
+      updated++;
     }
+    if (!statusChanged && !readingChanged) continue;
+
+    vocab[word] = {
+      word,
+      reading: existing?.reading || (reading ?? '').trim(),
+      meaning: existing?.meaning ?? '',
+      status,
+      encounters: existing?.encounters ?? 1,
+      firstSeenAt: existing?.firstSeenAt ?? now,
+      updatedAt: now,
+    };
   }
-  await storageSet({ [STORAGE_KEYS.VOCAB]: vocab });
-  return added;
+
+  if (!hasChromeStorage()) {
+    // Non-extension environment (tests): report the merge result, nothing to persist
+    return { added, updated, persisted: true };
+  }
+
+  try {
+    await storageSetStrict({ [STORAGE_KEYS.VOCAB]: vocab });
+    // Read back and verify the write actually landed (quota / context failures can otherwise
+    // go unnoticed because callers compute counts from the in-memory merge)
+    const readBack = await storageGet<Record<string, VocabEntry>>(STORAGE_KEYS.VOCAB, {});
+    if (Object.keys(readBack).length < Object.keys(vocab).length) {
+      return {
+        added: 0,
+        updated: 0,
+        persisted: false,
+        error:
+          'storage write did not persist (quota). Reload the extension in chrome://extensions to activate the unlimitedStorage permission, refresh this page, and import again.',
+      };
+    }
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    return {
+      added: 0,
+      updated: 0,
+      persisted: false,
+      error: `${raw}. If this mentions a quota, reload the extension in chrome://extensions (activates unlimitedStorage), refresh this page, and import again.`,
+    };
+  }
+
+  return { added, updated, persisted: true };
 }
 
 export async function getMinedCards(): Promise<MinedCard[]> {

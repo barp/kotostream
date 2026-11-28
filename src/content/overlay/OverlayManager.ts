@@ -638,6 +638,10 @@ export class OverlayManager {
   public updateVocabMap(vocabMap: Record<string, VocabEntry>) {
     this.vocabMap = vocabMap;
     this.renderCurrentSubtitle();
+    // Dashboard/popup imports (e.g. a Migaku word list) should recolor panel lines immediately
+    // too — refreshBrowserLineStatuses is a no-op when the panel is closed and only re-renders
+    // lines whose token statuses actually changed.
+    this.refreshBrowserLineStatuses();
   }
 
   private applyOverlayStyles() {
@@ -1339,32 +1343,38 @@ export class OverlayManager {
       this.captureState.status === 'listening' ||
       this.captureState.status === 'transcribing';
 
+    const rangeKnown =
+      range.startTimeSec !== undefined &&
+      range.endTimeSec !== undefined &&
+      range.endTimeSec > range.startTimeSec;
+
+    // Audio is only trustworthy for a cue range when the ring buffer actually covers BOTH the
+    // start and the end of the sentence. After a backward seek (e.g. clicking an older panel
+    // line) the buffer no longer spans that window — re-capture it instead of using whatever
+    // happened to be playing near the playhead!
+    const initialMatchesRange =
+      !rangeKnown || (Boolean(initial?.audioBase64) && Boolean(initial?.coverage?.hasStart && initial?.coverage?.hasEnd));
+
     // Instant 0ms return if buffer already covers the full sentence (or no cue timestamps exist)
-    if (
-      !isBuffering ||
-      !this.video ||
-      range.startTimeSec === undefined ||
-      range.endTimeSec === undefined ||
-      range.endTimeSec <= range.startTimeSec ||
-      (initial?.audioBase64 && initial.coverage?.hasStart && initial.coverage?.hasEnd)
-    ) {
-      return initial;
+    if (!isBuffering || !this.video || !rangeKnown || initialMatchesRange) {
+      return initialMatchesRange ? initial : undefined;
     }
 
     if (this.isCapturingClip) {
-      return initial;
+      return initialMatchesRange ? initial : undefined;
     }
 
     // User paused mid-sentence (before listening to the end) or jumped to a cue without
     // playing the start: silently capture the missing audio while speakers are muted!
     const captured = await this.captureMissingSentenceAudio(
-      range.startTimeSec,
-      range.endTimeSec,
+      range.startTimeSec!,
+      range.endTimeSec!,
       range.durationMs,
       initial?.coverage,
       showProgressToast
     );
-    return captured?.audioBase64 ? captured : initial;
+    // If the re-capture failed, attach NO audio rather than a wrong-position clip.
+    return captured?.audioBase64 ? captured : initialMatchesRange ? initial : undefined;
   }
 
   private async captureMissingSentenceAudio(
@@ -1426,18 +1436,41 @@ export class OverlayManager {
       });
 
       if (needSeek) {
-        await new Promise<void>((resolve) => {
+        // Verify the seek actually LANDED before playing: streaming/DRM players can stall or
+        // silently ignore a fast backward seek (e.g. right after a panel-line jump). Recording
+        // from the wrong position would put a different line's audio on the card, so give the
+        // seek up to 3s and abort cleanly when it never settles.
+        const landed = await new Promise<boolean>((resolve) => {
           let settled = false;
-          const finish = () => {
+          const nearTarget = () => Math.abs(video.currentTime - captureStartSec) < 0.9;
+          const finish = (ok: boolean) => {
             if (settled) return;
             settled = true;
-            video.removeEventListener('seeked', finish);
-            resolve();
+            video.removeEventListener('seeked', onSeeked);
+            window.clearInterval(pollId);
+            window.clearTimeout(timeoutId);
+            resolve(ok);
           };
-          video.addEventListener('seeked', finish, { once: true });
-          video.currentTime = captureStartSec;
-          setTimeout(finish, 800);
+          const onSeeked = () => finish(nearTarget());
+          const pollId = window.setInterval(() => {
+            if (nearTarget()) finish(true);
+          }, 120);
+          const timeoutId = window.setTimeout(() => finish(false), 3000);
+          video.addEventListener('seeked', onSeeked);
+          try {
+            video.currentTime = captureStartSec;
+          } catch {
+            finish(false);
+          }
         });
+
+        if (!landed) {
+          if (showProgressToast) {
+            this.showToast('Could not jump back to the sentence start — audio skipped.');
+          }
+          // The finally block restores playback, position, and speaker volume.
+          return undefined;
+        }
       }
 
       if (desiredRate > 1) {
@@ -1508,16 +1541,24 @@ export class OverlayManager {
       this.emitVideoTimeSync(true, false);
       await new Promise<void>((r) => setTimeout(r, 180));
 
-      result = await safeSendMessage<{
+      const post = await safeSendMessage<{
         audioBase64?: string;
         mimeType?: string;
         durationSec?: number;
+        coverage?: { hasStart: boolean; hasEnd: boolean };
       }>({
         type: 'REQUEST_RECENT_AUDIO',
         durationMs,
         startTimeSec,
         endTimeSec,
       });
+
+      // Accept only audio that genuinely spans the sentence. If coverage is still incomplete
+      // the capture never really covered the cue (e.g. the player fought the seek), and
+      // attaching it would put a different line's audio on the card.
+      if (post?.audioBase64 && post.coverage?.hasStart && post.coverage?.hasEnd) {
+        result = post;
+      }
     } finally {
       try {
         video.playbackRate = savedRate;

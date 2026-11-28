@@ -172,7 +172,7 @@ async function runBuild() {
     version: '1.0.0',
     description:
       'Migaku-inspired Japanese immersion toolkit with real-time AI Japanese subtitle generation for Amazon Prime Video, YouTube, Netflix, and more.',
-    permissions: ['storage', 'activeTab', 'tabCapture', 'offscreen', 'tabs', 'scripting', 'notifications'],
+    permissions: ['storage', 'unlimitedStorage', 'activeTab', 'tabCapture', 'offscreen', 'tabs', 'scripting', 'notifications'],
     host_permissions: [
       'https://*.primevideo.com/*',
       'https://*.amazon.com/*',
@@ -232,7 +232,19 @@ async function runBuild() {
     ],
   };
 
-  fs.writeFileSync(path.join(distDir, 'manifest.json'), JSON.stringify(manifestJson, null, 2));
+  const manifestPath = path.join(distDir, 'manifest.json');
+  fs.writeFileSync(manifestPath, JSON.stringify(manifestJson, null, 2));
+
+  // Guard against permission drift between this script and src/manifest.ts: the extension
+  // silently breaks (chrome.storage.local capped at 10 MB) if a required permission goes
+  // missing from the shipped manifest.
+  const REQUIRED_PERMISSIONS = ['storage', 'unlimitedStorage', 'notifications', 'tabCapture', 'offscreen', 'tabs', 'scripting'];
+  const written = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+  const missing = REQUIRED_PERMISSIONS.filter((p) => !written.permissions?.includes(p));
+  if (missing.length > 0) {
+    throw new Error(`Built manifest.json is missing required permissions: ${missing.join(', ')}`);
+  }
+
   console.log('✓ KotoStream extension built successfully into dist/');
 }
 

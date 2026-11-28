@@ -220,4 +220,33 @@ describe('TimestampedAudioRing exact sentence extraction', () => {
     expect(durSec).toBeGreaterThanOrEqual(2.8);
     expect(durSec).toBeLessThanOrEqual(3.3);
   });
+
+  it('never substitutes recent speech for a cue window the ring does not cover (backward seek mining)', () => {
+    const ring = new TimestampedAudioRing(60);
+    // The user watched 300.0-304.0 (amplitude 7000), then seeked BACK via the subtitle
+    // panel to an older line at 120.0-124.0 that has NOT re-played yet.
+    pushTaggedAudio(ring, 300.0, 304.0, 7000);
+
+    // Coverage for the old line must be reported as missing…
+    const coverage = ring.getCoverage(120.0, 124.0, 0.2);
+    expect(coverage.hasStart).toBe(false);
+    expect(coverage.hasEnd).toBe(false);
+
+    // …and the exact-range slice must return NOTHING (the caller re-captures the sentence)
+    // rather than audio of whatever was playing near the playhead (amplitude 7000)!
+    const extracted = ring.sliceByTimeRange(120.0, 124.0, 0.25, 0.25);
+    expect(extracted).toBeNull();
+
+    // Once the old line re-plays (after the silent re-capture), coverage completes and the
+    // slice returns the fresh pass — never stale audio from the other position.
+    ring.startNewSegment();
+    pushTaggedAudio(ring, 119.75, 124.3, 3000);
+    const recovered = ring.sliceByTimeRange(120.0, 124.0, 0.25, 0.25);
+    expect(recovered).not.toBeNull();
+    expect(recovered!.some((s) => Math.abs(s) === 3000)).toBe(true);
+    expect(recovered!.some((s) => Math.abs(s) === 7000)).toBe(false);
+    const recoveredCoverage = ring.getCoverage(120.0, 124.0, 0.2);
+    expect(recoveredCoverage.hasStart).toBe(true);
+    expect(recoveredCoverage.hasEnd).toBe(true);
+  });
 });

@@ -338,7 +338,28 @@ body {
 
 .pill.known { background: rgba(16, 185, 129, 0.2); color: #6ee7b7; }
 .pill.learning { background: rgba(245, 158, 11, 0.2); color: #fde68a; }
+.pill.ignored { background: rgba(100, 116, 139, 0.25); color: #cbd5e1; }
 .pill.unknown { background: rgba(239, 68, 68, 0.2); color: #fecaca; }
+
+/* Inline feedback directly under the action button that produced it */
+.inline-notice {
+  margin-top: 12px;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  border: 1px solid transparent;
+}
+.inline-notice.success {
+  background: rgba(16, 185, 129, 0.14);
+  border-color: rgba(16, 185, 129, 0.45);
+  color: #6ee7b7;
+}
+.inline-notice.error {
+  background: rgba(239, 68, 68, 0.14);
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #fecaca;
+}
 
 /* Playground tokens */
 .playground-sentence {
