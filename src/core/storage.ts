@@ -48,6 +48,12 @@ async function storageSet(items: Record<string, unknown>): Promise<void> {
 
 export async function getSettings(): Promise<AppSettings> {
   const saved = await storageGet<Partial<AppSettings>>(STORAGE_KEYS.SETTINGS, {});
+  const hasApiKey = Boolean(saved.stt?.apiKey?.trim());
+  const legacyGoogleDefault =
+    saved.anki?.translationModel === undefined &&
+    saved.anki?.translationProvider === 'google_free' &&
+    hasApiKey;
+
   return {
     enabled: saved.enabled ?? DEFAULT_SETTINGS.enabled,
     stt: {
@@ -59,6 +65,7 @@ export async function getSettings(): Promise<AppSettings> {
     anki: {
       ...DEFAULT_SETTINGS.anki,
       ...(saved.anki ?? {}),
+      ...(legacyGoogleDefault ? { translationProvider: 'openrouter' as const } : {}),
       fieldMapping: {
         ...DEFAULT_SETTINGS.anki.fieldMapping,
         ...(saved.anki?.fieldMapping ?? {}),

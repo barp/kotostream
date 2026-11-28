@@ -762,7 +762,12 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
       case 'TRANSLATE_SENTENCE': {
         try {
           const settings = await getSettings();
-          const result = await translateJapaneseSentence(message.sentence, settings, message.targetWord);
+          const result = await translateJapaneseSentence(message.sentence, settings, {
+            targetWord: message.targetWord,
+            contextBefore: message.contextBefore,
+            contextAfter: message.contextAfter,
+            showTitle: message.showTitle,
+          });
           return result;
         } catch (err) {
           return {
@@ -796,8 +801,28 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, sender, sendRes
               playing: message.playing,
               playbackRate: message.playbackRate,
               sentAtMs: message.sentAtMs,
+              seeked: message.seeked,
             } satisfies ExtensionMessage)
             .catch(() => {});
+        }
+        return { ok: true };
+      }
+
+      case 'SET_CLIP_CAPTURE_MODE': {
+        const tabId = sender.tab?.id;
+        if (tabId !== undefined && activeCaptureTabId === tabId) {
+          try {
+            await chrome.runtime.sendMessage({
+              type: 'OFFSCREEN_SET_CLIP_CAPTURE_MODE',
+              tabId,
+              active: message.active,
+              playbackRate: message.playbackRate,
+              unpitched: message.unpitched,
+              startNewSegment: message.startNewSegment,
+            } satisfies ExtensionMessage);
+          } catch {
+            // ignore
+          }
         }
         return { ok: true };
       }

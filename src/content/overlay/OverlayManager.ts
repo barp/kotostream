@@ -130,6 +130,7 @@ export class OverlayManager {
   private activeCuesForCurrentSub: SubtitleLine[] = [];
   private activeRowRange: { startSec: number; endSec: number } | null = null;
   private lastVideoSyncSentAt = 0;
+  private isCapturingClip = false;
   private activeEntry: DictionaryEntry | null = null;
   private pausedByOverlay = false;
   private hoverCloseTimer: number | null = null;
@@ -388,14 +389,14 @@ export class OverlayManager {
     video.removeEventListener('play', this.handleVideoStateSync);
     video.removeEventListener('playing', this.handleVideoStateSync);
     video.removeEventListener('pause', this.handleVideoStateSync);
-    video.removeEventListener('seeked', this.handleVideoStateSync);
+    video.removeEventListener('seeked', this.handleVideoSeeked);
     video.removeEventListener('ratechange', this.handleVideoStateSync);
 
     video.addEventListener('timeupdate', this.handleVideoTimeUpdate);
     video.addEventListener('play', this.handleVideoStateSync);
     video.addEventListener('playing', this.handleVideoStateSync);
     video.addEventListener('pause', this.handleVideoStateSync);
-    video.addEventListener('seeked', this.handleVideoStateSync);
+    video.addEventListener('seeked', this.handleVideoSeeked);
     video.addEventListener('ratechange', this.handleVideoStateSync);
     this.emitVideoTimeSync(true);
 
@@ -428,7 +429,7 @@ export class OverlayManager {
       this.video.removeEventListener('play', this.handleVideoStateSync);
       this.video.removeEventListener('playing', this.handleVideoStateSync);
       this.video.removeEventListener('pause', this.handleVideoStateSync);
-      this.video.removeEventListener('seeked', this.handleVideoStateSync);
+      this.video.removeEventListener('seeked', this.handleVideoSeeked);
       this.video.removeEventListener('ratechange', this.handleVideoStateSync);
     }
     this.host.style.display = 'none';
@@ -497,7 +498,7 @@ export class OverlayManager {
     return `${sign}${sec.toFixed(1)}s`;
   }
 
-  private emitVideoTimeSync(force = false) {
+  private emitVideoTimeSync(force = false, seeked = false) {
     if (!this.video) return;
     const isBuffering =
       this.captureState.status === 'buffering' ||
@@ -506,7 +507,8 @@ export class OverlayManager {
     if (!isBuffering) return;
 
     const now = Date.now();
-    if (!force && now - this.lastVideoSyncSentAt < 350) return;
+    const minIntervalMs = this.isCapturingClip ? 100 : 350;
+    if (!force && now - this.lastVideoSyncSentAt < minIntervalMs) return;
     this.lastVideoSyncSentAt = now;
 
     void safeSendMessage({
@@ -515,19 +517,25 @@ export class OverlayManager {
       playing: !this.video.paused && !this.video.ended && this.video.readyState >= 2,
       playbackRate: this.video.playbackRate || 1,
       sentAtMs: now,
+      seeked,
     });
   }
 
   private handleVideoStateSync = () => {
-    this.emitVideoTimeSync(true);
+    this.emitVideoTimeSync(true, false);
+  };
+
+  private handleVideoSeeked = () => {
+    this.emitVideoTimeSync(true, !this.isCapturingClip);
   };
 
   private handleVideoTimeUpdate = () => {
     this.syncFileSubtitleToVideo();
-    this.emitVideoTimeSync(false);
+    this.emitVideoTimeSync(false, false);
   };
 
   private syncFileSubtitleToVideo() {
+    if (this.isCapturingClip) return;
     if (!this.video || this.loadedFileSubtitles.length === 0) return;
     const activeCues = findActiveSubtitlesAtTime(
       this.loadedFileSubtitles,
@@ -1070,17 +1078,18 @@ export class OverlayManager {
     const popAudioBtn = this.popoverEl.querySelector<HTMLButtonElement>('[data-pop-audio="play"]');
     popAudioBtn?.addEventListener('click', async (e) => {
       e.stopPropagation();
-      const range = this.getActiveAudioRange();
-      const audioRes = await safeSendMessage<{ audioBase64?: string; mimeType?: string }>({
-        type: 'REQUEST_RECENT_AUDIO',
-        durationMs: range.durationMs,
-        startTimeSec: range.startTimeSec,
-        endTimeSec: range.endTimeSec,
-      });
-      if (audioRes?.audioBase64) {
-        await playBase64Audio(audioRes.audioBase64, audioRes.mimeType);
-      } else {
-        this.showToast('Enable Sentence Audio in the KotoStream popup to play clips.');
+      if (popAudioBtn.disabled) return;
+      popAudioBtn.disabled = true;
+      try {
+        const range = this.getActiveAudioRange();
+        const audioRes = await this.fetchSentenceAudio(range, true);
+        if (audioRes?.audioBase64) {
+          await playBase64Audio(audioRes.audioBase64, audioRes.mimeType);
+        } else {
+          this.showToast('Enable Sentence Audio in the KotoStream popup to play clips.');
+        }
+      } finally {
+        popAudioBtn.disabled = false;
       }
     });
 
@@ -1123,16 +1132,63 @@ export class OverlayManager {
     };
   }
 
-  private async fetchSentenceTranslation(sentence: string, targetWord?: string): Promise<string> {
-    if (!this.settings.anki.autoTranslate || this.settings.anki.translationProvider === 'off') {
-      return '';
+  private getSurroundingSubtitleContext(currentSentence: string): {
+    contextBefore: string[];
+    contextAfter: string[];
+  } {
+    const cleanLine = (t: string) => t.replace(/\n+/g, ' ').trim();
+    const targetClean = cleanLine(currentSentence);
+
+    if (this.loadedFileSubtitles.length > 0) {
+      const targetCue =
+        this.activeCuesForCurrentSub.find((c) => cleanLine(c.text) === targetClean) ??
+        this.activeCuesForCurrentSub[0];
+
+      const idx = targetCue
+        ? this.loadedFileSubtitles.findIndex((c) => c.id === targetCue.id)
+        : this.loadedFileSubtitles.findIndex((c) => cleanLine(c.text) === targetClean);
+
+      if (idx >= 0) {
+        const contextBefore = this.loadedFileSubtitles
+          .slice(Math.max(0, idx - 3), idx)
+          .map((c) => cleanLine(c.text))
+          .filter((l) => l && l !== targetClean);
+        const contextAfter = this.loadedFileSubtitles
+          .slice(idx + 1, idx + 2)
+          .map((c) => cleanLine(c.text))
+          .filter((l) => l && l !== targetClean);
+        return { contextBefore, contextAfter };
+      }
     }
-    const res = await safeSendMessage<{ translation?: string }>({
+
+    const historyBefore = this.subtitleHistory
+      .slice(-4)
+      .map((c) => cleanLine(c.text))
+      .filter((l) => l && l !== targetClean)
+      .slice(-3);
+    return { contextBefore: historyBefore, contextAfter: [] };
+  }
+
+  private async fetchSentenceTranslation(
+    sentence: string,
+    targetWord?: string
+  ): Promise<{ translation: string; providerUsed: string }> {
+    if (!this.settings.anki.autoTranslate || this.settings.anki.translationProvider === 'off') {
+      return { translation: '', providerUsed: 'off' };
+    }
+    const { contextBefore, contextAfter } = this.getSurroundingSubtitleContext(sentence);
+    const res = await safeSendMessage<{ translation?: string; providerUsed?: string }>({
       type: 'TRANSLATE_SENTENCE',
       sentence,
       targetWord,
+      contextBefore,
+      contextAfter,
+      showTitle: this.adapter.getMediaTitle(),
     });
-    return res?.translation?.trim() ?? '';
+    return {
+      translation: res?.translation?.trim() ?? '',
+      providerUsed: res?.providerUsed ?? '',
+    };
   }
 
   private getActiveAudioRange(): {
@@ -1163,6 +1219,245 @@ export class OverlayManager {
     }
 
     return { durationMs: 4500 };
+  }
+
+  private async fetchSentenceAudio(
+    range: { startTimeSec?: number; endTimeSec?: number; durationMs: number },
+    showProgressToast = true
+  ): Promise<{ audioBase64?: string; mimeType?: string; durationSec?: number } | undefined> {
+    type RecentAudioResp = {
+      audioBase64?: string;
+      mimeType?: string;
+      durationSec?: number;
+      coverage?: {
+        hasStart: boolean;
+        hasEnd: boolean;
+        coveredStartSec: number | null;
+        coveredEndSec: number | null;
+      };
+    };
+
+    const initial = await safeSendMessage<RecentAudioResp>({
+      type: 'REQUEST_RECENT_AUDIO',
+      durationMs: range.durationMs,
+      startTimeSec: range.startTimeSec,
+      endTimeSec: range.endTimeSec,
+    });
+
+    const isBuffering =
+      this.captureState.status === 'buffering' ||
+      this.captureState.status === 'listening' ||
+      this.captureState.status === 'transcribing';
+
+    // Instant 0ms return if buffer already covers the full sentence (or no cue timestamps exist)
+    if (
+      !isBuffering ||
+      !this.video ||
+      range.startTimeSec === undefined ||
+      range.endTimeSec === undefined ||
+      range.endTimeSec <= range.startTimeSec ||
+      (initial?.audioBase64 && initial.coverage?.hasStart && initial.coverage?.hasEnd)
+    ) {
+      return initial;
+    }
+
+    if (this.isCapturingClip) {
+      return initial;
+    }
+
+    // User paused mid-sentence (before listening to the end) or jumped to a cue without
+    // playing the start: silently capture the missing audio while speakers are muted!
+    const captured = await this.captureMissingSentenceAudio(
+      range.startTimeSec,
+      range.endTimeSec,
+      range.durationMs,
+      initial?.coverage,
+      showProgressToast
+    );
+    return captured?.audioBase64 ? captured : initial;
+  }
+
+  private async captureMissingSentenceAudio(
+    startTimeSec: number,
+    endTimeSec: number,
+    durationMs: number,
+    coverage?: {
+      hasStart: boolean;
+      hasEnd: boolean;
+      coveredStartSec: number | null;
+      coveredEndSec: number | null;
+    },
+    showProgressToast = true
+  ): Promise<{ audioBase64?: string; mimeType?: string; durationSec?: number } | undefined> {
+    const video = this.video;
+    if (!video) return undefined;
+
+    const wasPaused = video.paused;
+    const savedTime = video.currentTime;
+    const savedRate = video.playbackRate || 1;
+    const savedPreservesPitch = video.preservesPitch ?? true;
+
+    const maxDuration =
+      Number.isFinite(video.duration) && video.duration > 0 ? video.duration : endTimeSec + 0.35;
+    const targetEndSec = Math.min(maxDuration, endTimeSec + 0.3);
+
+    // If the ring buffer already has the start of the sentence up to ~savedTime,
+    // just continue silently from savedTime (zero backward seek, zero rebuffering!).
+    const canContinueWithoutSeek =
+      Boolean(coverage?.hasStart) &&
+      coverage?.coveredEndSec !== null &&
+      coverage?.coveredEndSec !== undefined &&
+      savedTime >= startTimeSec - 0.15 &&
+      savedTime <= targetEndSec &&
+      coverage.coveredEndSec >= savedTime - 0.65;
+
+    const needSeek = !canContinueWithoutSeek;
+    const captureStartSec = needSeek ? Math.max(0, startTimeSec - 0.25) : savedTime;
+    const spanSec = Math.max(0.25, targetEndSec - captureStartSec);
+
+    // Always capture at native 1x speed so the 48 kHz Stereo PCM matches the original audio bit-for-bit!
+    const desiredRate = 1;
+
+    this.isCapturingClip = true;
+    if (showProgressToast) {
+      this.showToast('Capturing full sentence audio…');
+    }
+
+    let result: { audioBase64?: string; mimeType?: string; durationSec?: number } | undefined;
+
+    try {
+      // Mute speakers FIRST before seeking or playing so the user hears zero sound
+      await safeSendMessage({
+        type: 'SET_CLIP_CAPTURE_MODE',
+        active: true,
+        playbackRate: desiredRate,
+        unpitched: desiredRate > 1,
+        startNewSegment: needSeek,
+      });
+
+      if (needSeek) {
+        await new Promise<void>((resolve) => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            video.removeEventListener('seeked', finish);
+            resolve();
+          };
+          video.addEventListener('seeked', finish, { once: true });
+          video.currentTime = captureStartSec;
+          setTimeout(finish, 800);
+        });
+      }
+
+      if (desiredRate > 1) {
+        try {
+          video.preservesPitch = false;
+          video.playbackRate = desiredRate;
+        } catch {
+          // Player refused rate change; fall back to 1x seamlessly
+        }
+      } else if (video.playbackRate !== 1) {
+        try {
+          video.playbackRate = 1;
+        } catch {
+          // ignore
+        }
+      }
+
+      const actualRate = video.playbackRate || 1;
+      const unpitched = actualRate > 1.05 && video.preservesPitch === false;
+
+      if (Math.abs(actualRate - desiredRate) > 0.05 || unpitched !== (desiredRate > 1)) {
+        await safeSendMessage({
+          type: 'SET_CLIP_CAPTURE_MODE',
+          active: true,
+          playbackRate: actualRate,
+          unpitched,
+          startNewSegment: false,
+        });
+      }
+
+      this.emitVideoTimeSync(true, needSeek);
+
+      try {
+        await video.play();
+      } catch {
+        return undefined;
+      }
+
+      this.emitVideoTimeSync(true, false);
+
+      const timeoutMs = Math.min(12000, Math.max(3500, (spanSec / actualRate) * 1000 + 2500));
+
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearInterval(pollId);
+          clearTimeout(timeoutId);
+          video.removeEventListener('timeupdate', check);
+          video.removeEventListener('ended', finish);
+          resolve();
+        };
+        const check = () => {
+          this.emitVideoTimeSync(false, false);
+          if (video.currentTime >= targetEndSec || video.ended) {
+            finish();
+          }
+        };
+        video.addEventListener('timeupdate', check);
+        video.addEventListener('ended', finish, { once: true });
+        const pollId = window.setInterval(check, 40);
+        const timeoutId = window.setTimeout(finish, timeoutMs);
+      });
+
+      // Pause at targetEndSec and wait ~180ms so Chrome's audio pipeline tail flushes into audioRing
+      video.pause();
+      this.emitVideoTimeSync(true, false);
+      await new Promise<void>((r) => setTimeout(r, 180));
+
+      result = await safeSendMessage<{
+        audioBase64?: string;
+        mimeType?: string;
+        durationSec?: number;
+      }>({
+        type: 'REQUEST_RECENT_AUDIO',
+        durationMs,
+        startTimeSec,
+        endTimeSec,
+      });
+    } finally {
+      try {
+        video.playbackRate = savedRate;
+        video.preservesPitch = savedPreservesPitch;
+      } catch {
+        // ignore
+      }
+
+      if (Math.abs(video.currentTime - savedTime) > 0.05) {
+        try {
+          video.currentTime = savedTime;
+        } catch {
+          // ignore
+        }
+      }
+
+      await safeSendMessage({
+        type: 'SET_CLIP_CAPTURE_MODE',
+        active: false,
+      });
+
+      if (!wasPaused) {
+        void video.play().catch(() => {});
+      }
+
+      this.isCapturingClip = false;
+      this.emitVideoTimeSync(true, true);
+    }
+
+    return result;
   }
 
   private async startMineWorkflow(
@@ -1205,18 +1500,16 @@ export class OverlayManager {
     // Calculate exact episode timestamp window (adjusted by subtitleOffsetSec) for sentence audio extraction
     const range = this.getActiveAudioRange();
 
-    // Capture clean video screenshot & exact sentence audio clip first (before opening modal!)
-    const [shot, audioRes] = await Promise.all([
-      this.captureVideoFrame(),
-      this.settings.anki.includeAudio
-        ? safeSendMessage<{ audioBase64?: string; mimeType?: string; durationSec?: number }>({
-            type: 'REQUEST_RECENT_AUDIO',
-            durationMs: range.durationMs,
-            startTimeSec: range.startTimeSec,
-            endTimeSec: range.endTimeSec,
-          })
-        : Promise.resolve(undefined),
-    ]);
+    // Start translation in parallel, capture clean screenshot FIRST at the exact paused frame,
+    // then fetch (or silently finish capturing) the complete sentence audio from start to end!
+    const translationPromise = draft.translating
+      ? this.fetchSentenceTranslation(sentence, word)
+      : Promise.resolve({ translation: '', providerUsed: 'off' });
+
+    const shot = await this.captureVideoFrame();
+    const audioRes = this.settings.anki.includeAudio
+      ? await this.fetchSentenceAudio(range, true)
+      : undefined;
 
     draft.screenshotDataUrl = shot.dataUrl;
     draft.screenshotFormat = shot.format;
@@ -1227,7 +1520,8 @@ export class OverlayManager {
     draft.audioDurationSec = audioRes?.durationSec;
 
     if (!this.settings.anki.openPreviewBeforeSaving) {
-      draft.translation = await this.fetchSentenceTranslation(sentence, word);
+      const transRes = await translationPromise;
+      draft.translation = transRes.translation;
       draft.translating = false;
       await this.commitCardDraft(draft);
       return;
@@ -1238,16 +1532,24 @@ export class OverlayManager {
     this.openCardCreatorModal();
 
     if (draft.translating) {
-      const translated = await this.fetchSentenceTranslation(sentence, word);
+      const transRes = await translationPromise;
       if (this.cardDraft === draft) {
-        draft.translation = translated;
+        draft.translation = transRes.translation;
         draft.translating = false;
         const transInput = this.modalBackdropEl.querySelector<HTMLTextAreaElement>('[data-draft-field="translation"]');
         if (transInput && !transInput.value.trim()) {
-          transInput.value = translated;
+          transInput.value = transRes.translation;
         }
         const transStatus = this.modalBackdropEl.querySelector<HTMLElement>('[data-trans-status]');
-        if (transStatus) transStatus.textContent = translated ? 'Auto-translated' : '';
+        if (transStatus) {
+          const label =
+            transRes.providerUsed === 'openrouter'
+              ? 'Auto-translated (OpenRouter AI)'
+              : transRes.providerUsed === 'google_free'
+                ? 'Auto-translated (Google Translate)'
+                : 'Auto-translated';
+          transStatus.textContent = transRes.translation ? label : '';
+        }
         this.refreshModalPreview();
       }
     }
@@ -1412,11 +1714,19 @@ export class OverlayManager {
       } else if (action === 'retranslate') {
         const statusEl = this.modalBackdropEl.querySelector<HTMLElement>('[data-trans-status]');
         if (statusEl) statusEl.textContent = 'Translating…';
-        const translated = await this.fetchSentenceTranslation(d.sentence, d.word);
-        d.translation = translated;
+        const transRes = await this.fetchSentenceTranslation(d.sentence, d.word);
+        d.translation = transRes.translation;
         const transInput = this.modalBackdropEl.querySelector<HTMLTextAreaElement>('[data-draft-field="translation"]');
-        if (transInput) transInput.value = translated;
-        if (statusEl) statusEl.textContent = translated ? 'Updated' : 'Unavailable';
+        if (transInput) transInput.value = transRes.translation;
+        if (statusEl) {
+          const label =
+            transRes.providerUsed === 'openrouter'
+              ? 'Updated (OpenRouter AI)'
+              : transRes.providerUsed === 'google_free'
+                ? 'Updated (Google Translate)'
+                : 'Updated';
+          statusEl.textContent = transRes.translation ? label : 'Unavailable';
+        }
         this.refreshModalPreview();
       } else if (action === 'retake-shot') {
         const shot = await this.captureVideoFrame();

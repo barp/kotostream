@@ -5,20 +5,32 @@ export interface TranslationResult {
   providerUsed: string;
 }
 
+export interface TranslationContext {
+  targetWord?: string;
+  contextBefore?: string[];
+  contextAfter?: string[];
+  showTitle?: string;
+}
+
 /**
  * Translates a mined Japanese sentence into the target language (default: English).
- * Supports free Google Translate (zero-key default) and OpenRouter LLM.
+ * Uses OpenRouter LLM with surrounding episode dialogue context when configured,
+ * falling back cleanly to free Google Translate if no API key is set or the request fails.
  */
 export async function translateJapaneseSentence(
   sentence: string,
   settings: AppSettings,
-  targetWord?: string
+  targetWordOrContext?: string | TranslationContext
 ): Promise<TranslationResult> {
   const cleaned = sentence.trim();
   if (!cleaned) return { translation: '', providerUsed: 'none' };
 
   const provider = settings.anki.translationProvider;
   const targetLang = settings.anki.translationTargetLang || 'en';
+  const ctx: TranslationContext =
+    typeof targetWordOrContext === 'string'
+      ? { targetWord: targetWordOrContext }
+      : (targetWordOrContext ?? {});
 
   if (provider === 'off') {
     return { translation: '', providerUsed: 'off' };
@@ -30,7 +42,8 @@ export async function translateJapaneseSentence(
         settings.stt.apiKey.trim(),
         cleaned,
         targetLang,
-        targetWord
+        settings.anki.translationModel || 'google/gemini-2.5-flash',
+        ctx
       );
       if (text) return { translation: text, providerUsed: 'openrouter' };
     } catch {
@@ -40,6 +53,41 @@ export async function translateJapaneseSentence(
 
   const googleText = await translateWithGoogleFree(cleaned, targetLang);
   return { translation: googleText, providerUsed: 'google_free' };
+}
+
+export function buildTranslationUserPrompt(sentence: string, ctx: TranslationContext): string {
+  const parts: string[] = [];
+  if (ctx.showTitle?.trim()) {
+    parts.push(`Show: ${ctx.showTitle.trim()}`);
+  }
+  const before = (ctx.contextBefore ?? []).map((l) => l.trim()).filter(Boolean).slice(-3);
+  if (before.length > 0) {
+    parts.push(`Previous dialogue (context only, do not translate):\n${before.map((l) => `- ${l}`).join('\n')}`);
+  }
+  parts.push(`Target line to translate:\n${sentence}`);
+  const after = (ctx.contextAfter ?? []).map((l) => l.trim()).filter(Boolean).slice(0, 1);
+  if (after.length > 0) {
+    parts.push(`Next dialogue (context only, do not translate):\n${after.map((l) => `- ${l}`).join('\n')}`);
+  }
+  if (ctx.targetWord?.trim()) {
+    parts.push(`Target vocabulary word: ${ctx.targetWord.trim()}`);
+  }
+  return parts.join('\n\n');
+}
+
+export function cleanLlmTranslation(raw: string): string {
+  let text = raw.trim();
+  // Strip accidental label prefixes like "Translation:"
+  text = text.replace(/^(?:translation|english|output)\s*:\s*/i, '').trim();
+  // Strip accidental wrapping quotes
+  if (
+    (text.startsWith('"') && text.endsWith('"')) ||
+    (text.startsWith('“') && text.endsWith('”')) ||
+    (text.startsWith('「') && text.endsWith('」'))
+  ) {
+    text = text.slice(1, -1).trim();
+  }
+  return text;
 }
 
 export function parseGoogleTranslateResponse(data: unknown): string {
@@ -66,9 +114,33 @@ async function translateWithOpenRouter(
   apiKey: string,
   sentence: string,
   targetLang: string,
-  targetWord?: string
+  model: string,
+  ctx: TranslationContext
 ): Promise<string> {
-  const focusHint = targetWord ? ` Pay special attention to accurately rendering the nuance of "${targetWord}".` : '';
+  const payload: Record<string, unknown> = {
+    model: model.trim() || 'google/gemini-2.5-flash',
+    temperature: 0.2,
+    max_tokens: 260,
+    messages: [
+      {
+        role: 'system',
+        content: [
+          `You are an expert Japanese-to-${targetLang} anime and media subtitle translator.`,
+          `Translate ONLY the "Target line to translate" into natural, idiomatic ${targetLang} that matches the speaker's tone and scene.`,
+          `- Use the surrounding dialogue context (if provided) to accurately infer omitted Japanese subjects, pronouns, objects, and nuance.`,
+          `- Never include or translate the surrounding context lines in your output.`,
+          `- Preserve colloquial speech, slang, idioms, and the exact contextual sense of any target vocabulary word rather than translating literally.`,
+          `- Output ONLY the final translation text—no quotes, no explanations, no romaji, and no prefixes.`,
+        ].join('\n'),
+      },
+      { role: 'user', content: buildTranslationUserPrompt(sentence, ctx) },
+    ],
+  };
+
+  if (model.includes('gemini-2.5-flash')) {
+    payload.reasoning = { effort: 'none' };
+  }
+
   const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -76,24 +148,12 @@ async function translateWithOpenRouter(
       'Content-Type': 'application/json',
       'X-Title': 'KotoStream',
     },
-    body: JSON.stringify({
-      model: 'google/gemini-2.5-flash',
-      temperature: 0.2,
-      max_tokens: 180,
-      reasoning: { effort: 'none' },
-      messages: [
-        {
-          role: 'system',
-          content: `You are a natural Japanese-to-${targetLang} subtitle translator. Translate the Japanese dialogue line naturally and concisely. Return ONLY the translation with no quotes, notes, or romaji.${focusHint}`,
-        },
-        { role: 'user', content: sentence },
-      ],
-    }),
+    body: JSON.stringify(payload),
   });
 
   if (!res.ok) {
     throw new Error(`OpenRouter translation error: ${res.status}`);
   }
   const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-  return json.choices?.[0]?.message?.content?.trim() ?? '';
+  return cleanLlmTranslation(json.choices?.[0]?.message?.content ?? '');
 }

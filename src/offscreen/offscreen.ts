@@ -1,8 +1,10 @@
 import type { ExtensionMessage, SttSettings } from '../types';
 import {
+  type AudioRangeCoverage,
   TARGET_SAMPLE_RATE,
   TimestampedAudioRing,
   encodeWav,
+  interleaveStereoToInt16,
   resampleTo16k,
   trimSilencePcm,
   uint8ToBase64,
@@ -24,8 +26,8 @@ let currentSettings: SttSettings | null = null;
 let captureMode: 'live_stt' | 'buffer_only' | 'prescan' = 'buffer_only';
 let isCapturing = false;
 
-// 60-second timestamped 16kHz mono PCM ring buffer for exact Migaku-style sentence audio mining
-const audioRing = new TimestampedAudioRing(RING_BUFFER_SECONDS, TARGET_SAMPLE_RATE);
+// 60-second timestamped native-rate stereo PCM ring buffer for studio-quality Migaku-style sentence audio mining
+let audioRing = new TimestampedAudioRing(RING_BUFFER_SECONDS, 48000, 2);
 let videoSyncReceived = false;
 let videoSyncTimeSec = 0;
 let videoSyncWallMs = 0;
@@ -33,6 +35,7 @@ let videoSyncPlaying = false;
 let videoSyncPlaybackRate = 1;
 let videoPausedAtWallMs = 0;
 let consecutiveSilentFrames = 0;
+let clipCaptureActive = false;
 
 // Live STT chunk state
 let pcmBuffers: Float32Array[] = [];
@@ -62,6 +65,7 @@ function resetVideoSyncState() {
   videoSyncPlaybackRate = 1;
   videoPausedAtWallMs = 0;
   consecutiveSilentFrames = 0;
+  clipCaptureActive = false;
 }
 
 /**
@@ -70,6 +74,8 @@ function resetVideoSyncState() {
  *   extracts the exact episode window `[startTimeSec - 0.25s, endTimeSec + 0.25s]` so audio always
  *   starts at the very beginning of the sentence—even if the user paused for 10+ seconds or slightly
  *   after the line ended.
+ * - Reports `coverage` (`hasStart`, `hasEnd`) so the overlay can silently capture any missing tail/start
+ *   if the user paused mid-sentence before listening to the end!
  * - Falls back to scanning the full buffer for the most recent `requestedDurationMs` of speech.
  */
 function sliceRecentAudioWav(
@@ -80,8 +86,10 @@ function sliceRecentAudioWav(
   audioBase64?: string;
   mimeType?: string;
   durationSec?: number;
+  coverage?: AudioRangeCoverage;
 } {
   let sliced: Int16Array | null = null;
+  let coverage: AudioRangeCoverage | undefined;
 
   if (
     startTimeSec !== undefined &&
@@ -90,6 +98,7 @@ function sliceRecentAudioWav(
     Number.isFinite(endTimeSec) &&
     endTimeSec > startTimeSec
   ) {
+    coverage = audioRing.getCoverage(startTimeSec, endTimeSec, 0.2);
     sliced = audioRing.sliceByTimeRange(startTimeSec, endTimeSec, 0.25, 0.25);
   }
 
@@ -97,15 +106,17 @@ function sliceRecentAudioWav(
     sliced = audioRing.sliceRecent(requestedDurationMs);
   }
 
-  if (!sliced || sliced.length < TARGET_SAMPLE_RATE * 0.25) {
-    return {};
+  const samplesPerSec = audioRing.sampleRate * audioRing.numChannels;
+  if (!sliced || sliced.length < samplesPerSec * 0.25) {
+    return { coverage };
   }
 
-  const wavBytes = encodeWav(sliced, TARGET_SAMPLE_RATE);
+  const wavBytes = encodeWav(sliced, audioRing.sampleRate, audioRing.numChannels);
   return {
     audioBase64: uint8ToBase64(wavBytes),
     mimeType: 'audio/wav',
-    durationSec: Math.round((sliced.length / TARGET_SAMPLE_RATE) * 10) / 10,
+    durationSec: Math.round((sliced.length / samplesPerSec) * 10) / 10,
+    coverage,
   };
 }
 
@@ -265,7 +276,7 @@ async function startCapture(
   resetChunkState();
   resetPrescanState(playbackRate);
   resetVideoSyncState();
-  audioRing.clear();
+  audioRing = new TimestampedAudioRing(RING_BUFFER_SECONDS, audioContext.sampleRate, 2);
   isCapturing = true;
 
   processorNode.onaudioprocess = (event) => {
@@ -318,21 +329,22 @@ async function startCapture(
     const pausedTailFinished =
       videoSyncReceived &&
       !videoSyncPlaying &&
-      (isDigitalSilence || nowMs - videoPausedAtWallMs > 280);
+      (nowMs - videoPausedAtWallMs > 350 || consecutiveSilentFrames >= 3);
     const untimestampedLongSilence = !videoSyncReceived && consecutiveSilentFrames > 15;
 
     if (!pausedTailFinished && !untimestampedLongSilence) {
-      const frame16k = resampleTo16k([mono], audioContext.sampleRate);
+      // Store native sample-rate (e.g. 48 kHz) 16-bit Stereo PCM directly — zero downsampling, studio quality!
+      const stereoFrame = interleaveStereoToInt16(left, right ?? left);
       if (videoSyncReceived) {
         const elapsedSec = videoSyncPlaying
           ? Math.max(0, (nowMs - videoSyncWallMs) / 1000) * videoSyncPlaybackRate
-          : Math.min(0.25, Math.max(0, (nowMs - videoSyncWallMs) / 1000)) * videoSyncPlaybackRate;
+          : Math.min(0.32, Math.max(0, (nowMs - videoSyncWallMs) / 1000)) * videoSyncPlaybackRate;
         const frameEndSec = Math.max(0, videoSyncTimeSec + elapsedSec - AUDIO_PIPELINE_LATENCY_SEC);
-        const frameDurationSec = (frame16k.length / TARGET_SAMPLE_RATE) * videoSyncPlaybackRate;
+        const frameDurationSec = (left.length / audioContext.sampleRate) * videoSyncPlaybackRate;
         const frameStartSec = Math.max(0, frameEndSec - frameDurationSec);
-        audioRing.push(frame16k, frameStartSec, frameEndSec);
+        audioRing.push(stereoFrame, frameStartSec, frameEndSec);
       } else {
-        audioRing.push(frame16k, null, null);
+        audioRing.push(stereoFrame, null, null);
       }
     }
 
@@ -509,8 +521,25 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
       videoSyncWallMs = message.sentAtMs || Date.now();
       videoSyncPlaying = message.playing;
       videoSyncPlaybackRate = Math.max(0.25, message.playbackRate || 1);
+      if (message.seeked) {
+        audioRing.startNewSegment();
+      }
       if (wasPlaying && !message.playing) {
         videoPausedAtWallMs = Date.now();
+      }
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message.type === 'OFFSCREEN_SET_CLIP_CAPTURE_MODE') {
+    if (currentTabId === null || message.tabId === currentTabId) {
+      clipCaptureActive = message.active;
+      if (message.startNewSegment) {
+        audioRing.startNewSegment();
+      }
+      if (passthroughGain) {
+        passthroughGain.gain.value = captureMode === 'prescan' || clipCaptureActive ? 0 : 1;
       }
     }
     sendResponse({ ok: true });

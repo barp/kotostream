@@ -68,21 +68,75 @@ export function resampleTo16k(buffers: Float32Array[], effectiveSampleRate: numb
   return out;
 }
 
-export function trimSilencePcm(samples: Int16Array, thresholdAmp = 180): Int16Array {
-  const pad = Math.floor(TARGET_SAMPLE_RATE * 0.14);
-  let start = 0;
-  let end = samples.length - 1;
+/**
+ * Converts native-rate Float32 stereo (or mono) Web Audio buffers directly to interleaved Int16 PCM
+ * with ZERO downsampling and ZERO mono fold-down, preserving 100% original studio audio quality.
+ */
+export function interleaveStereoToInt16(
+  left: Float32Array,
+  right: Float32Array | null
+): Int16Array {
+  const len = left.length;
+  if (!right) {
+    const out = new Int16Array(len);
+    for (let i = 0; i < len; i++) {
+      const s = Math.max(-1, Math.min(1, left[i]));
+      out[i] = s < 0 ? Math.round(s * 0x8000) : Math.round(s * 0x7fff);
+    }
+    return out;
+  }
 
-  while (start < end && Math.abs(samples[start]) < thresholdAmp) start++;
-  while (end > start && Math.abs(samples[end]) < thresholdAmp) end--;
+  const out = new Int16Array(len * 2);
+  for (let i = 0; i < len; i++) {
+    const l = Math.max(-1, Math.min(1, left[i]));
+    const r = Math.max(-1, Math.min(1, right[i]));
+    out[i * 2] = l < 0 ? Math.round(l * 0x8000) : Math.round(l * 0x7fff);
+    out[i * 2 + 1] = r < 0 ? Math.round(r * 0x8000) : Math.round(r * 0x7fff);
+  }
+  return out;
+}
 
-  if (start >= end) return samples;
-  const paddedStart = Math.max(0, start - pad);
-  const paddedEnd = Math.min(samples.length, end + pad);
+export function trimSilencePcm(
+  samples: Int16Array,
+  thresholdAmp = 180,
+  sampleRate = TARGET_SAMPLE_RATE,
+  numChannels = 1
+): Int16Array {
+  const channels = Math.max(1, numChannels);
+  const totalFrames = Math.floor(samples.length / channels);
+  if (totalFrames === 0) return samples;
+
+  const padFrames = Math.floor(sampleRate * 0.14);
+  let startFrame = 0;
+  let endFrame = totalFrames - 1;
+
+  const framePeak = (frameIdx: number): number => {
+    const base = frameIdx * channels;
+    let peak = 0;
+    for (let c = 0; c < channels; c++) {
+      const a = Math.abs(samples[base + c]);
+      if (a > peak) peak = a;
+    }
+    return peak;
+  };
+
+  while (startFrame < endFrame && framePeak(startFrame) < thresholdAmp) startFrame++;
+  while (endFrame > startFrame && framePeak(endFrame) < thresholdAmp) endFrame--;
+
+  if (startFrame >= endFrame) return samples;
+  const paddedStart = Math.max(0, startFrame - padFrames) * channels;
+  const paddedEnd = Math.min(totalFrames, endFrame + 1 + padFrames) * channels;
   return samples.subarray(paddedStart, paddedEnd);
 }
 
-export function encodeWav(samples: Int16Array, sampleRate = TARGET_SAMPLE_RATE): Uint8Array {
+export function encodeWav(
+  samples: Int16Array,
+  sampleRate = TARGET_SAMPLE_RATE,
+  numChannels = 1
+): Uint8Array {
+  const channels = Math.max(1, numChannels);
+  const blockAlign = channels * 2;
+  const byteRate = sampleRate * blockAlign;
   const dataSize = samples.length * 2;
   const buffer = new ArrayBuffer(44 + dataSize);
   const view = new DataView(buffer);
@@ -99,10 +153,10 @@ export function encodeWav(samples: Int16Array, sampleRate = TARGET_SAMPLE_RATE):
   writeStr(12, 'fmt ');
   view.setUint32(16, 16, true);
   view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
+  view.setUint16(22, channels, true);
   view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
   view.setUint16(34, 16, true);
   writeStr(36, 'data');
   view.setUint32(40, dataSize, true);
@@ -132,6 +186,13 @@ interface AudioRingFrame {
   segmentId: number;
 }
 
+export interface AudioRangeCoverage {
+  hasStart: boolean;
+  hasEnd: boolean;
+  coveredStartSec: number | null;
+  coveredEndSec: number | null;
+}
+
 /**
  * Timestamped rolling PCM ring buffer (16 kHz mono Int16) for Migaku-style sentence audio extraction.
  *
@@ -140,20 +201,32 @@ interface AudioRingFrame {
  * paused for 10+ seconds to read a dictionary entry or paused slightly after the line finished.
  */
 export class TimestampedAudioRing {
+  public readonly sampleRate: number;
+  public readonly numChannels: number;
   private frames: AudioRingFrame[] = [];
   private totalSamples = 0;
   private maxSamples: number;
   private currentSegmentId = 0;
   private lastEndSec: number | null = null;
 
-  constructor(maxDurationSec = 60, sampleRate = TARGET_SAMPLE_RATE) {
-    this.maxSamples = Math.max(sampleRate, Math.floor(maxDurationSec * sampleRate));
+  constructor(maxDurationSec = 60, sampleRate = TARGET_SAMPLE_RATE, numChannels = 1) {
+    this.sampleRate = sampleRate;
+    this.numChannels = Math.max(1, numChannels);
+    this.maxSamples = Math.max(
+      sampleRate * this.numChannels,
+      Math.floor(maxDurationSec * sampleRate) * this.numChannels
+    );
   }
 
   public clear(): void {
     this.frames = [];
     this.totalSamples = 0;
     this.currentSegmentId = 0;
+    this.lastEndSec = null;
+  }
+
+  public startNewSegment(): void {
+    this.currentSegmentId++;
     this.lastEndSec = null;
   }
 
@@ -166,7 +239,7 @@ export class TimestampedAudioRing {
 
     // Detect seek/discontinuity so re-watched segments never concatenate with earlier passes
     if (startSec !== null && endSec !== null && this.lastEndSec !== null) {
-      if (startSec < this.lastEndSec - 0.5 || startSec > this.lastEndSec + 1.5) {
+      if (startSec < this.lastEndSec - 0.15 || startSec > this.lastEndSec + 1.5) {
         this.currentSegmentId++;
       }
     }
@@ -187,6 +260,56 @@ export class TimestampedAudioRing {
       const removed = this.frames.shift()!;
       this.totalSamples -= removed.samples.length;
     }
+  }
+
+  /**
+   * Reports whether the most recent playback segment overlapping `[startSec, endSec]`
+   * covers both the start and the end of the requested sentence.
+   */
+  public getCoverage(
+    startSec: number,
+    endSec: number,
+    toleranceSec = 0.2
+  ): AudioRangeCoverage {
+    if (this.frames.length === 0 || !Number.isFinite(startSec) || !Number.isFinite(endSec)) {
+      return { hasStart: false, hasEnd: false, coveredStartSec: null, coveredEndSec: null };
+    }
+
+    const winStart = Math.max(0, startSec - 0.25);
+    const winEnd = Math.max(winStart + 0.5, endSec + 0.25);
+
+    let targetSegmentId: number | null = null;
+    for (let i = this.frames.length - 1; i >= 0; i--) {
+      const f = this.frames[i];
+      if (f.startSec !== null && f.endSec !== null && f.endSec > winStart && f.startSec < winEnd) {
+        targetSegmentId = f.segmentId;
+        break;
+      }
+    }
+
+    if (targetSegmentId === null) {
+      return { hasStart: false, hasEnd: false, coveredStartSec: null, coveredEndSec: null };
+    }
+
+    let minStart = Infinity;
+    let maxEnd = -Infinity;
+    for (const f of this.frames) {
+      if (f.segmentId !== targetSegmentId) continue;
+      if (f.startSec === null || f.endSec === null) continue;
+      if (f.startSec < minStart) minStart = f.startSec;
+      if (f.endSec > maxEnd) maxEnd = f.endSec;
+    }
+
+    if (!Number.isFinite(minStart) || !Number.isFinite(maxEnd)) {
+      return { hasStart: false, hasEnd: false, coveredStartSec: null, coveredEndSec: null };
+    }
+
+    return {
+      hasStart: minStart <= Math.max(0, startSec) + toleranceSec,
+      hasEnd: maxEnd >= endSec - toleranceSec,
+      coveredStartSec: minStart,
+      coveredEndSec: maxEnd,
+    };
   }
 
   /**
@@ -231,8 +354,11 @@ export class TimestampedAudioRing {
 
       const relStart = Math.max(0, (winStart - f.startSec) / frameDur);
       const relEnd = Math.min(1, (winEnd - f.startSec) / frameDur);
-      const s0 = Math.max(0, Math.min(f.samples.length, Math.floor(relStart * f.samples.length)));
-      const s1 = Math.max(s0, Math.min(f.samples.length, Math.ceil(relEnd * f.samples.length)));
+      const numFrames = Math.floor(f.samples.length / this.numChannels);
+      const f0 = Math.max(0, Math.min(numFrames, Math.floor(relStart * numFrames)));
+      const f1 = Math.max(f0, Math.min(numFrames, Math.ceil(relEnd * numFrames)));
+      const s0 = f0 * this.numChannels;
+      const s1 = f1 * this.numChannels;
       if (s1 > s0) {
         const sub = f.samples.subarray(s0, s1);
         slices.push(sub);
@@ -240,7 +366,7 @@ export class TimestampedAudioRing {
       }
     }
 
-    if (outLen < TARGET_SAMPLE_RATE * 0.25) return null;
+    if (outLen < this.sampleRate * this.numChannels * 0.25) return null;
 
     const merged = new Int16Array(outLen);
     let offset = 0;
@@ -250,7 +376,7 @@ export class TimestampedAudioRing {
     }
 
     // Only trim pure digital silence at the outer edges so we never cut off the first syllable
-    return trimSilencePcm(merged, 80);
+    return trimSilencePcm(merged, 80, this.sampleRate, this.numChannels);
   }
 
   /**
@@ -258,7 +384,8 @@ export class TimestampedAudioRing {
    * to find the end of the last spoken audio and slices `requestedDurationMs` ending there.
    */
   public sliceRecent(requestedDurationMs = 4500): Int16Array | null {
-    if (this.totalSamples < TARGET_SAMPLE_RATE * 0.3) {
+    const samplesPerSec = this.sampleRate * this.numChannels;
+    if (this.totalSamples < samplesPerSec * 0.3) {
       return null;
     }
 
@@ -270,23 +397,36 @@ export class TimestampedAudioRing {
     }
 
     const silenceThreshold = 200;
-    let speechEnd = linear.length - 1;
-    while (speechEnd > 0 && Math.abs(linear[speechEnd]) < silenceThreshold) {
-      speechEnd--;
+    const totalFrames = Math.floor(linear.length / this.numChannels);
+    let speechEndFrame = totalFrames - 1;
+    while (speechEndFrame > 0) {
+      const base = speechEndFrame * this.numChannels;
+      let peak = 0;
+      for (let c = 0; c < this.numChannels; c++) {
+        const a = Math.abs(linear[base + c]);
+        if (a > peak) peak = a;
+      }
+      if (peak >= silenceThreshold) break;
+      speechEndFrame--;
     }
 
-    if (speechEnd < TARGET_SAMPLE_RATE * 0.25) {
+    if (speechEndFrame < this.sampleRate * 0.25) {
       return null;
     }
 
     const clampedMs = Math.min(60000, Math.max(1500, requestedDurationMs));
-    const tailPad = Math.floor(TARGET_SAMPLE_RATE * 0.18);
-    const clipEnd = Math.min(linear.length, speechEnd + tailPad);
-    const desiredSamples = Math.floor((clampedMs / 1000) * TARGET_SAMPLE_RATE);
-    const clipStart = Math.max(0, clipEnd - desiredSamples);
+    const tailPadFrames = Math.floor(this.sampleRate * 0.18);
+    const clipEndFrame = Math.min(totalFrames, speechEndFrame + 1 + tailPadFrames);
+    const desiredFrames = Math.floor((clampedMs / 1000) * this.sampleRate);
+    const clipStartFrame = Math.max(0, clipEndFrame - desiredFrames);
 
-    const sliced = trimSilencePcm(linear.subarray(clipStart, clipEnd), 120);
-    if (sliced.length < TARGET_SAMPLE_RATE * 0.25) {
+    const sliced = trimSilencePcm(
+      linear.subarray(clipStartFrame * this.numChannels, clipEndFrame * this.numChannels),
+      120,
+      this.sampleRate,
+      this.numChannels
+    );
+    if (sliced.length < samplesPerSec * 0.25) {
       return null;
     }
     return sliced;

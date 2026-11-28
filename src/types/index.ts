@@ -74,6 +74,7 @@ export interface AnkiSettings {
   includeAudio: boolean;
   autoTranslate: boolean;
   translationProvider: TranslationProvider;
+  translationModel: string;
   translationTargetLang: string;
   fieldMapping: AnkiFieldMapping;
 }
@@ -159,7 +160,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     screenshotQuality: 0.82,
     includeAudio: true,
     autoTranslate: true,
-    translationProvider: 'google_free',
+    translationProvider: 'openrouter',
+    translationModel: 'google/gemini-2.5-flash',
     translationTargetLang: 'en',
     fieldMapping: {
       targetWord: 'Target Word',
@@ -293,7 +295,14 @@ export type ExtensionMessage =
   | { type: 'SUBTITLE_RECEIVED'; subtitle: SubtitleLine; tabId?: number }
   | { type: 'LOOKUP_WORD'; word: string; surface?: string; exactOnly?: boolean }
   | { type: 'TOKENIZE_TEXT'; text: string }
-  | { type: 'TRANSLATE_SENTENCE'; sentence: string; targetWord?: string }
+  | {
+      type: 'TRANSLATE_SENTENCE';
+      sentence: string;
+      targetWord?: string;
+      contextBefore?: string[];
+      contextAfter?: string[];
+      showTitle?: string;
+    }
   | { type: 'CAPTURE_SCREENSHOT' }
   | { type: 'REQUEST_RECENT_AUDIO'; durationMs?: number; startTimeSec?: number; endTimeSec?: number }
   | {
@@ -302,6 +311,7 @@ export type ExtensionMessage =
       playing: boolean;
       playbackRate: number;
       sentAtMs: number;
+      seeked?: boolean;
     }
   | {
       type: 'OFFSCREEN_VIDEO_SYNC';
@@ -310,6 +320,22 @@ export type ExtensionMessage =
       playing: boolean;
       playbackRate: number;
       sentAtMs: number;
+      seeked?: boolean;
+    }
+  | {
+      type: 'SET_CLIP_CAPTURE_MODE';
+      active: boolean;
+      playbackRate?: number;
+      unpitched?: boolean;
+      startNewSegment?: boolean;
+    }
+  | {
+      type: 'OFFSCREEN_SET_CLIP_CAPTURE_MODE';
+      tabId: number;
+      active: boolean;
+      playbackRate?: number;
+      unpitched?: boolean;
+      startNewSegment?: boolean;
     }
   | {
       type: 'OFFSCREEN_START_AUDIO';

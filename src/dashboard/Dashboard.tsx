@@ -1390,11 +1390,58 @@ export const Dashboard: React.FC = () => {
                     }))
                   }
                 >
-                  <option value="google_free">Free Google Translate (Zero-key default)</option>
-                  <option value="openrouter">OpenRouter LLM (google/gemini-2.5-flash — uses OpenRouter key)</option>
+                  <option value="openrouter">OpenRouter AI (Context-aware — falls back to Google if no key)</option>
+                  <option value="google_free">Free Google Translate (No API key needed)</option>
                   <option value="off">Off</option>
                 </select>
               </div>
+
+              {settings.anki.translationProvider === 'openrouter' && (
+                <div className="field">
+                  <label>OpenRouter Translation Model</label>
+                  <select
+                    value={
+                      [
+                        'google/gemini-2.5-flash',
+                        'google/gemini-2.5-pro',
+                        'anthropic/claude-sonnet-4',
+                        'openai/gpt-4.1-mini',
+                        'deepseek/deepseek-chat-v3-0324',
+                      ].includes(settings.anki.translationModel)
+                        ? settings.anki.translationModel
+                        : '__custom__'
+                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val !== '__custom__') {
+                        setSettings((s) => ({
+                          ...s,
+                          anki: { ...s.anki, translationModel: val },
+                        }));
+                      }
+                    }}
+                  >
+                    <option value="google/gemini-2.5-flash">Google Gemini 2.5 Flash (Fast &amp; natural — Recommended)</option>
+                    <option value="google/gemini-2.5-pro">Google Gemini 2.5 Pro (Top Japanese nuance)</option>
+                    <option value="anthropic/claude-sonnet-4">Anthropic Claude Sonnet 4 (Best English localization)</option>
+                    <option value="openai/gpt-4.1-mini">OpenAI GPT-4.1 Mini (Fast &amp; accurate)</option>
+                    <option value="deepseek/deepseek-chat-v3-0324">DeepSeek V3 (Budget CJK)</option>
+                    <option value="__custom__">Custom OpenRouter Model ID…</option>
+                  </select>
+                  <input
+                    type="text"
+                    value={settings.anki.translationModel}
+                    placeholder="google/gemini-2.5-flash"
+                    style={{ marginTop: 6 }}
+                    onChange={(e) =>
+                      setSettings((s) => ({
+                        ...s,
+                        anki: { ...s.anki, translationModel: e.target.value },
+                      }))
+                    }
+                  />
+                </div>
+              )}
 
               <div className="field">
                 <label>Translation Target Language</label>

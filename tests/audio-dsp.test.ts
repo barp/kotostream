@@ -3,6 +3,7 @@ import {
   TARGET_SAMPLE_RATE,
   TimestampedAudioRing,
   encodeWav,
+  interleaveStereoToInt16,
   resampleTo16k,
 } from '../src/core/audio-dsp';
 
@@ -137,6 +138,74 @@ describe('TimestampedAudioRing exact sentence extraction', () => {
     const durSec = extracted!.length / TARGET_SAMPLE_RATE;
     expect(durSec).toBeGreaterThanOrEqual(2.0);
     expect(durSec).toBeLessThanOrEqual(2.3);
+  });
+
+  it('reports incomplete coverage when paused mid-sentence and stitches seamlessly once finished', () => {
+    const ring = new TimestampedAudioRing(60);
+    // User watched up to 11.4s of a [10.0, 13.5] sentence and paused
+    pushTaggedAudio(ring, 10.0, 11.4, 4000);
+
+    const before = ring.getCoverage(10.0, 13.5);
+    expect(before.hasStart).toBe(true);
+    expect(before.hasEnd).toBe(false);
+    expect(before.coveredEndSec).toBeCloseTo(11.4, 1);
+
+    // Silent on-demand capture continues from 11.4s to 13.8s
+    pushTaggedAudio(ring, 11.4, 13.8, 5000);
+
+    const after = ring.getCoverage(10.0, 13.5);
+    expect(after.hasStart).toBe(true);
+    expect(after.hasEnd).toBe(true);
+
+    const extracted = ring.sliceByTimeRange(10.0, 13.5, 0.2, 0.2);
+    expect(extracted).not.toBeNull();
+    expect(extracted!.some((s) => s === 4000)).toBe(true);
+    expect(extracted!.some((s) => s === 5000)).toBe(true);
+    const durSec = extracted!.length / TARGET_SAMPLE_RATE;
+    expect(durSec).toBeGreaterThanOrEqual(3.5);
+    expect(durSec).toBeLessThanOrEqual(3.9);
+  });
+
+  it('startNewSegment isolates a fresh backward seek even for small (<0.5s) rewinds', () => {
+    const ring = new TimestampedAudioRing(60);
+    pushTaggedAudio(ring, 10.0, 10.3, 2000);
+    ring.startNewSegment();
+    pushTaggedAudio(ring, 9.8, 12.2, 8000);
+
+    const extracted = ring.sliceByTimeRange(10.0, 12.0, 0.1, 0.1);
+    expect(extracted).not.toBeNull();
+    expect(extracted!.every((s) => s === 8000)).toBe(true);
+  });
+
+  it('preserves native 48 kHz stereo L/R channel alignment through TimestampedAudioRing and encodeWav', () => {
+    const sampleRate = 48000;
+    const ring = new TimestampedAudioRing(10, sampleRate, 2);
+    const stepSec = 0.05;
+    const framesPerStep = Math.round(sampleRate * stepSec);
+
+    // Push 2 seconds of 48 kHz stereo where Left = +0.5 (~16384) and Right = -0.25 (~-8192)
+    for (let t = 5.0; t < 7.0 - 1e-6; t += stepSec) {
+      const left = new Float32Array(framesPerStep).fill(0.5);
+      const right = new Float32Array(framesPerStep).fill(-0.25);
+      const interleaved = interleaveStereoToInt16(left, right);
+      ring.push(interleaved, t, t + stepSec);
+    }
+
+    const sliced = ring.sliceByTimeRange(5.3, 6.4, 0.1, 0.1);
+    expect(sliced).not.toBeNull();
+    // Must be even length (stereo L/R pairs) and preserve L > 0, R < 0 on every frame!
+    expect(sliced!.length % 2).toBe(0);
+    for (let i = 0; i < sliced!.length; i += 2) {
+      expect(sliced![i]).toBeGreaterThan(15000);
+      expect(sliced![i + 1]).toBeLessThan(-7000);
+    }
+
+    const wav = encodeWav(sliced!, sampleRate, 2);
+    const view = new DataView(wav.buffer, wav.byteOffset, wav.byteLength);
+    expect(view.getUint16(22, true)).toBe(2); // 2 channels (stereo)
+    expect(view.getUint32(24, true)).toBe(48000); // 48 kHz
+    expect(view.getUint32(28, true)).toBe(48000 * 4); // byteRate = 192000
+    expect(view.getUint16(32, true)).toBe(4); // blockAlign = 4 bytes/frame
   });
 
   it('fallback sliceRecent scans past long pause silence without cutting off the sentence start', () => {

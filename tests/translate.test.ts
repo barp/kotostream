@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { parseGoogleTranslateResponse } from '../src/background/translate';
+import {
+  buildTranslationUserPrompt,
+  cleanLlmTranslation,
+  parseGoogleTranslateResponse,
+} from '../src/background/translate';
 
 describe('parseGoogleTranslateResponse', () => {
   it('concatenates multi-segment Google Translate responses', () => {
@@ -19,5 +23,28 @@ describe('parseGoogleTranslateResponse', () => {
   it('returns empty string for malformed payloads', () => {
     expect(parseGoogleTranslateResponse(null)).toBe('');
     expect(parseGoogleTranslateResponse({})).toBe('');
+  });
+});
+
+describe('context-aware OpenRouter translation helpers', () => {
+  it('builds a structured prompt with show title, surrounding dialogue, and target word', () => {
+    const prompt = buildTranslationUserPrompt('そんなわけないじゃん。', {
+      showTitle: 'とある暗部の少女共棲',
+      contextBefore: ['本当にあいつがやったのか？', '証拠ならある。'],
+      contextAfter: ['じゃあ説明してみろよ。'],
+      targetWord: 'わけない',
+    });
+    expect(prompt).toContain('Show: とある暗部の少女共棲');
+    expect(prompt).toContain('- 本当にあいつがやったのか？');
+    expect(prompt).toContain('Target line to translate:\nそんなわけないじゃん。');
+    expect(prompt).toContain('- じゃあ説明してみろよ。');
+    expect(prompt).toContain('Target vocabulary word: わけない');
+  });
+
+  it('strips accidental labels and wrapping quotes from LLM output', () => {
+    expect(cleanLlmTranslation('Translation: "There\'s no way that\'s true."')).toBe(
+      "There's no way that's true."
+    );
+    expect(cleanLlmTranslation('「No way!」')).toBe('No way!');
   });
 });
