@@ -7,6 +7,7 @@ import {
   getMinedCards,
   getVocabMap,
   hydrateMinedCard,
+  markAllCardsSentToAnki,
   markCardSentToAnki,
   updateMinedCard,
 } from '../src/core/storage';
@@ -173,8 +174,25 @@ describe('mined card media decoupling', () => {
     expect(typeof afterMark[0].ankiSentAt).toBe('number');
     expect((await getCardMedia(created.id)).audioBase64).toBe('UklGR_FULL_48KHZ_STEREO_WAV');
 
+    // Bulk-marking all unsent cards marks only cards that were not yet sent
+    const unsent = await addMinedCard({
+      word: '希望',
+      reading: 'きぼう',
+      meaning: 'hope',
+      sentence: '希望を持つ。',
+      sourceTitle: 'Prime Video',
+      sourceUrl: 'https://www.primevideo.com/detail/test',
+    });
+    const markedCount = await markAllCardsSentToAnki();
+    expect(markedCount).toBe(1);
+    const afterBulk = await getMinedCards();
+    const unsentAfter = afterBulk.find((c) => c.id === unsent.id);
+    expect(typeof unsentAfter?.ankiSentAt).toBe('number');
+    expect(await markAllCardsSentToAnki()).toBe(0);
+
     // Deleting the card cleans up both the index entry and its media key
     await deleteMinedCard(created.id);
+    await deleteMinedCard(unsent.id);
     expect(await getMinedCards()).toHaveLength(0);
     expect(store.has(`kotostream_card_media_${created.id}`)).toBe(false);
   });

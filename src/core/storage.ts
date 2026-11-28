@@ -332,6 +332,21 @@ export async function markCardSentToAnki(
   return cards[idx];
 }
 
+export async function markAllCardsSentToAnki(): Promise<number> {
+  const cards = await storageGet<MinedCard[]>(STORAGE_KEYS.CARDS, []);
+  const now = Date.now();
+  let updatedCount = 0;
+  const next = cards.map((card) => {
+    if (card.ankiNoteId || card.ankiSentAt) return card;
+    updatedCount++;
+    return stripCardMedia({ ...card, ankiSentAt: now });
+  });
+  if (updatedCount > 0) {
+    await storageSet({ [STORAGE_KEYS.CARDS]: next });
+  }
+  return updatedCount;
+}
+
 export async function deleteMinedCard(cardId: string): Promise<void> {
   const cards = await storageGet<MinedCard[]>(STORAGE_KEYS.CARDS, []);
   const filtered = cards.filter((c) => c.id !== cardId);

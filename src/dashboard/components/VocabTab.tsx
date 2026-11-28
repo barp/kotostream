@@ -6,6 +6,7 @@ import {
   getCardMedia,
   getVocabMap,
   hydrateMinedCard,
+  markAllCardsSentToAnki,
   markCardSentToAnki,
   setWordStatus,
 } from '../../core/storage';
@@ -44,6 +45,7 @@ export const VocabTab: React.FC<VocabTabProps> = ({
   const [syncingCardId, setSyncingCardId] = useState<string | null>(null);
   const [playingCardId, setPlayingCardId] = useState<string | null>(null);
   const [confirmDeleteCardId, setConfirmDeleteCardId] = useState<string | null>(null);
+  const [confirmMarkAllSent, setConfirmMarkAllSent] = useState(false);
   const [cardThumbs, setCardThumbs] = useState<Record<string, string>>({});
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -165,6 +167,21 @@ export const VocabTab: React.FC<VocabTabProps> = ({
     (safeVocabPage - 1) * VOCAB_PER_PAGE,
     safeVocabPage * VOCAB_PER_PAGE
   );
+
+  const unsentCardsCount = useMemo(
+    () => cards.filter((c) => !c.ankiNoteId && !c.ankiSentAt).length,
+    [cards]
+  );
+
+  const handleMarkAllSentToAnki = async () => {
+    setConfirmMarkAllSent(false);
+    const updatedCount = await markAllCardsSentToAnki();
+    await onReload();
+    onNotice(
+      'success',
+      `Marked ${updatedCount} card${updatedCount === 1 ? '' : 's'} as Sent to Anki.`
+    );
+  };
 
   const handleSyncCardToAnki = async (card: MinedCard) => {
     if (card.ankiNoteId || card.ankiSentAt) return;
@@ -385,14 +402,44 @@ export const VocabTab: React.FC<VocabTabProps> = ({
               Review your mined moments, replay 48 kHz sentence audio, sync to AnkiConnect, or export as TSV.
             </p>
           </div>
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={handleDownloadTsv}
-            disabled={cards.length === 0}
-          >
-            <DownloadIcon size={13} /> Export TSV
-          </button>
+          <div className="row tight">
+            {unsentCardsCount > 0 &&
+              (confirmMarkAllSent ? (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-primary"
+                    onClick={() => void handleMarkAllSentToAnki()}
+                  >
+                    <CheckIcon size={12} /> Confirm ({unsentCardsCount})
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() => setConfirmMarkAllSent(false)}
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() => setConfirmMarkAllSent(true)}
+                  title="Mark all currently unsent cards as already exported to Anki"
+                >
+                  <CheckIcon size={12} /> Mark All Sent ({unsentCardsCount})
+                </button>
+              ))}
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={handleDownloadTsv}
+              disabled={cards.length === 0}
+            >
+              <DownloadIcon size={13} /> Export TSV
+            </button>
+          </div>
         </div>
 
         {cards.length > 0 && (
